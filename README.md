@@ -1,6 +1,4 @@
-<<<<<<< HEAD
-# gig-notifier
-=======
+
 # 📡 Gig Notifier
 
 > Interactive Telegram bot for discovering and monitoring freelance project listings in real-time.
