@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass, asdict
 from typing import Optional
 
+from curl_cffi import requests
+from scrapling import Selector
 from scrapling.fetchers import StealthyFetcher
 
 logging.basicConfig(
@@ -172,9 +174,32 @@ def _first(selector_list):
     return None
 
 
+def _fetch_html(url: str) -> Selector:
+    """Fetch HTML using curl_cffi with Chrome impersonation.
+    Falls back to StealthyFetcher (browser) if blocked."""
+    try:
+        r = requests.get(url, impersonate="chrome120", timeout=30)
+        r.raise_for_status()
+        # Detect Cloudflare challenge page
+        if "cf-chl-bypass" in r.headers or "captcha" in r.text.lower()[:5000]:
+            raise ValueError("Cloudflare challenge detected")
+        return Selector(content=r.text, url=url)
+    except Exception as e:
+        logger.warning(f"curl_cffi failed ({e}), falling back to StealthyFetcher...")
+        StealthyFetcher.adaptive = True
+        fetched = StealthyFetcher.fetch(
+            url,
+            headless=True,
+            network_idle=True,
+            block_images=True,
+        )
+        return fetched
+
+
 def scrape_listing(category_id: str = "all", page: int = 1) -> list[Project]:
     """
     Scrape projects.co.id listing page for a specific category.
+    Uses curl_cffi for fast HTTP with TLS fingerprint impersonation.
     Returns list of Project dataclasses.
     """
     url = get_category_url(category_id)
@@ -183,14 +208,7 @@ def scrape_listing(category_id: str = "all", page: int = 1) -> list[Project]:
         url = f"{url}{sep}page={page}"
 
     logger.info(f"Fetching {url}")
-
-    StealthyFetcher.adaptive = True
-    fetched = StealthyFetcher.fetch(
-        url,
-        headless=True,
-        network_idle=True,
-        block_images=True,  # faster, we only need HTML
-    )
+    fetched = _fetch_html(url)
 
     projects = []
 
@@ -324,13 +342,25 @@ def _extract_field(text: str, pattern: str) -> Optional[str]:
     return None
 
 
-def scrape_all_pages(category_id: str = "all", max_pages: int = 10) -> list[Project]:
-    """Scrape all pages for a category and return combined projects."""
+def scrape_all_pages(
+    category_id: str = "all",
+    max_pages: int = 10,
+    progress_callback=None,
+) -> list[Project]:
+    """Scrape all pages for a category and return combined projects.
+
+    Args:
+        category_id: Category to scrape
+        max_pages: Maximum pages to fetch
+        progress_callback: Optional callback(current, total, count) called after each page
+    """
     all_projects = []
     for page in range(1, max_pages + 1):
         try:
             projects = scrape_listing(category_id, page)
             all_projects.extend(projects)
+            if progress_callback:
+                progress_callback(page, max_pages, len(all_projects))
             if not projects:
                 break
         except Exception as e:

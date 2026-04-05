@@ -18,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 from scraper import (
     scrape_listing,
-    scrape_all_pages,
     CATEGORIES,
     get_category_by_id,
     Project,
@@ -669,13 +668,30 @@ class ProjectsBot:
     async def _show_category_page(
         self, chat_id: str, message_id: int, category_id: str, page: int
     ):
-        """Fetch ALL website pages, combine, then paginate in Telegram."""
+        """Fetch ALL website pages with interactive emoji progress bar."""
         category = get_category_by_id(category_id)
 
-        # Show loading state immediately
+        # Progress bar state
+        progress_data = {"current": 0, "total": 0, "count": 0}
+
+        def make_progress_bar(current: int, total: int) -> str:
+            filled = min(current, total)
+            empty = total - filled
+            bar = "🟢" * filled + "⬜" * empty
+            return bar
+
+        def on_progress(current: int, total: int, count: int):
+            progress_data["current"] = current
+            progress_data["total"] = total
+            progress_data["count"] = count
+
+        # Show initial loading
+        bar = make_progress_bar(0, 6)
         loading_text = (
             f"{category['emoji']} <b>{category['name']}</b>\n\n"
-            f"⏳ <i>Loading all projects (this may take a moment)...</i>"
+            f"🔍 <i>Fetching page 0/6...</i>\n"
+            f"{bar}\n"
+            f"📦 <i>0 projects found so far</i>"
         )
         loading_kb = {
             "inline_keyboard": [[{"text": "⏳ Loading...", "callback_data": "noop"}]]
@@ -689,12 +705,57 @@ class ProjectsBot:
             reply_markup=loading_kb,
         )
 
-        # Fetch ALL pages from website and combine
+        # Fetch ALL pages from website in background thread
         loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            all_projects = await loop.run_in_executor(
-                executor, scrape_all_pages, category_id, 10
-            )
+
+        async def scrape_with_progress():
+            """Run scrape_all_pages with periodic message updates."""
+            all_projects = []
+
+            def scrape_one_page(pg):
+                from scraper import scrape_listing
+
+                projects = scrape_listing(category_id, pg)
+                all_projects.extend(projects)
+                return projects
+
+            # Estimate total pages (start with 10, adjust after first fetch)
+            max_pages = 10
+
+            for pg in range(1, max_pages + 1):
+                result = await loop.run_in_executor(None, scrape_one_page, pg)
+                progress_data["current"] = pg
+                progress_data["count"] = len(all_projects)
+
+                # Update progress message
+                bar = make_progress_bar(pg, max_pages)
+                progress_text = (
+                    f"{category['emoji']} <b>{category['name']}</b>\n\n"
+                    f"🔍 <i>Fetching page {pg}/{max_pages}...</i>\n"
+                    f"{bar}\n"
+                    f"📦 <i>{len(all_projects)} projects found so far</i>"
+                )
+                try:
+                    await edit_message(
+                        TELEGRAM_BOT_TOKEN,
+                        int(chat_id),
+                        message_id,
+                        progress_text,
+                        reply_markup=loading_kb,
+                    )
+                except Exception:
+                    pass  # Ignore edit failures (rate limit, same text, etc.)
+
+                if not result:
+                    progress_data["total"] = pg
+                    break
+
+                await asyncio.sleep(0.2)
+
+            return all_projects
+
+        all_projects = await scrape_with_progress()
+        actual_pages = progress_data["current"]
 
         if not all_projects:
             await edit_message(
@@ -894,13 +955,19 @@ class ProjectsBot:
                 logger.info(f"  Seeding: {category['name']}")
                 loop = asyncio.get_event_loop()
                 with ThreadPoolExecutor(max_workers=2) as executor:
-                    projects = await loop.run_in_executor(
-                        executor, scrape_all_pages, cat_id, 10
-                    )
-                for p in projects:
+                    # Fetch all pages for seeding
+                    all_projects = []
+                    for pg in range(1, 11):
+                        page_projects = await loop.run_in_executor(
+                            executor, scrape_listing, cat_id, pg
+                        )
+                        all_projects.extend(page_projects)
+                        if not page_projects:
+                            break
+                for p in all_projects:
                     self.tracker.mark_seen(p.project_id)
                 logger.info(
-                    f"  Seeded {len(projects)} projects from {category['name']}"
+                    f"  Seeded {len(all_projects)} projects from {category['name']}"
                 )
                 await asyncio.sleep(1)
             except Exception as e:

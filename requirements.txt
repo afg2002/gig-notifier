@@ -1,3 +1,4 @@
 scrapling>=0.4
 httpx
 python-dotenv
+curl_cffi
