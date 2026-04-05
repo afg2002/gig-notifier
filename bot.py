@@ -270,6 +270,22 @@ def _truncate(text: str, max_len: int) -> str:
     return text[:max_len].rsplit(" ", 1)[0] + "..."
 
 
+def _is_published_today(published_date: str) -> bool:
+    """Check if a project was published today.
+    Expected format: 'DD/MM/YYYY HH:MM:SS WIB'"""
+    if not published_date:
+        return False
+    try:
+        date_part = published_date.split(" ")[0]  # "05/04/2026"
+        day, month, year = date_part.split("/")
+        from datetime import date
+
+        pub_date = date(int(year), int(month), int(day))
+        return pub_date == date.today()
+    except (ValueError, IndexError):
+        return False
+
+
 # ============================================================
 # Inline Keyboard Builders
 # ============================================================
@@ -907,8 +923,12 @@ class ProjectsBot:
                     logger.info(f"Polling: {category['name']}")
 
                     projects = scrape_listing(cat_id, 1)
+                    # Only notify projects that are both unseen AND published today
                     new_projects = [
-                        p for p in projects if not self.tracker.is_seen(p.project_id)
+                        p
+                        for p in projects
+                        if not self.tracker.is_seen(p.project_id)
+                        and _is_published_today(p.published_date)
                     ]
 
                     if new_projects:
