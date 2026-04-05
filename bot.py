@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 from scraper import (
     scrape_listing,
+    scrape_all_pages,
     CATEGORIES,
     get_category_by_id,
     Project,
@@ -207,10 +208,7 @@ def format_project_card(project: Project, index: int = 0) -> str:
     if project.tags:
         card += f"🏷️ <b>Tags:</b> {', '.join(project.tags)}\n"
 
-    card += (
-        f"👤 <b>Owner:</b> {project.owner_name}\n"
-        f"🔗 <a href='{project.link}'>View Project →</a>\n"
-    )
+    card += f"👤 <b>Owner:</b> {project.owner_name}\n"
 
     return card
 
@@ -225,7 +223,6 @@ def format_project_list(
     header = (
         f"{cat_emoji} <b>{cat_name}</b> — Page {page}/{total_pages}\n"
         f"📊 {len(projects)} projects ditemukan\n"
-        f"{'─' * 30}\n"
     )
 
     items = []
@@ -237,8 +234,7 @@ def format_project_list(
             f"<b>#{i + 1}</b> {p.title}\n"
             f"   💰 {budget_short}\n"
             f"   {bid_emoji} {p.bid_count or '0'} bids  •  "
-            f"📅 {p.published_date or '-'}\n"
-            f"   🔗 <a href='{p.link}'>View →</a>"
+            f"📅 {p.published_date or '-'}"
         )
 
     return header + "\n\n".join(items)
@@ -640,6 +636,12 @@ class ProjectsBot:
                 reply_markup=build_main_menu_keyboard(),
             )
 
+    async def _cb_category(
+        self, chat_id: str, message_id: int, category_id: str, callback_id: str
+    ):
+        await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
+        await self._show_category_page(chat_id, message_id, category_id, 1)
+
     async def _cb_category_list(
         self, chat_id: str, message_id: int | None, callback_id: str | None
     ):
@@ -664,20 +666,17 @@ class ProjectsBot:
                 reply_markup=build_category_keyboard(),
             )
 
-    async def _cb_category(
-        self, chat_id: str, message_id: int, category_id: str, callback_id: str
-    ):
-        await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
-        await self._show_category_page(chat_id, message_id, category_id, 1)
-
     async def _show_category_page(
         self, chat_id: str, message_id: int, category_id: str, page: int
     ):
-        """Fetch and display a category page. Scraping runs in background thread."""
+        """Fetch ALL website pages, combine, then paginate in Telegram."""
         category = get_category_by_id(category_id)
 
         # Show loading state immediately
-        loading_text = f"{category['emoji']} <b>{category['name']}</b>\n\n⏳ <i>Loading projects...</i>"
+        loading_text = (
+            f"{category['emoji']} <b>{category['name']}</b>\n\n"
+            f"⏳ <i>Loading all projects (this may take a moment)...</i>"
+        )
         loading_kb = {
             "inline_keyboard": [[{"text": "⏳ Loading...", "callback_data": "noop"}]]
         }
@@ -690,20 +689,20 @@ class ProjectsBot:
             reply_markup=loading_kb,
         )
 
-        # Run blocking scrape in background thread
+        # Fetch ALL pages from website and combine
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=2) as executor:
-            projects = await loop.run_in_executor(
-                executor, scrape_listing, category_id, page
+            all_projects = await loop.run_in_executor(
+                executor, scrape_all_pages, category_id, 10
             )
 
-        if not projects:
+        if not all_projects:
             await edit_message(
                 TELEGRAM_BOT_TOKEN,
                 int(chat_id),
                 message_id,
                 f"{category['emoji']} <b>{category['name']}</b>\n\n"
-                "😔 Tidak ada project di halaman ini.",
+                "😔 Tidak ada project ditemukan.",
                 reply_markup={
                     "inline_keyboard": [
                         [{"text": "🔙 Categories", "callback_data": "catlist"}],
@@ -714,14 +713,15 @@ class ProjectsBot:
             return
 
         total_pages = max(
-            1, (len(projects) + PROJECTS_PER_PAGE - 1) // PROJECTS_PER_PAGE
+            1, (len(all_projects) + PROJECTS_PER_PAGE - 1) // PROJECTS_PER_PAGE
         )
 
         start = (page - 1) * PROJECTS_PER_PAGE
         end = start + PROJECTS_PER_PAGE
-        page_projects = projects[start:end]
+        page_projects = all_projects[start:end]
 
-        self.cache.store(category_id, page, page_projects)
+        # Cache ALL projects for detail callbacks
+        self.cache.store(category_id, 0, all_projects)
 
         text = format_project_list(page_projects, category, page, total_pages)
         kb = self._build_project_keyboard(category_id, page, total_pages, page_projects)
@@ -736,14 +736,16 @@ class ProjectsBot:
         """Build keyboard with pagination and project detail buttons."""
         buttons = []
 
-        # Project detail buttons
+        # Project detail buttons — use absolute index for cache lookup
+        abs_start = (page - 1) * PROJECTS_PER_PAGE
         for i, p in enumerate(projects):
+            abs_index = abs_start + i
             short_title = _truncate(p.title, 25)
             buttons.append(
                 [
                     {
-                        "text": f"📋 #{i + 1} {short_title}",
-                        "callback_data": f"proj:{i}:{category_id}:{page}",
+                        "text": f"📋 #{abs_index + 1} {short_title}",
+                        "callback_data": f"proj:{abs_index}:{category_id}:{page}",
                     }
                 ]
             )
@@ -775,41 +777,66 @@ class ProjectsBot:
         callback_id: str,
     ):
         await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
-        await self._show_category_page(chat_id, message_id, category_id, page)
+
+        # Get all projects from cache (stored at page 0)
+        all_projects = self.cache.get(category_id, 0)
+        if not all_projects:
+            await answer_callback(
+                TELEGRAM_BOT_TOKEN,
+                callback_id,
+                text="⚠️ Data expired, coba /browse lagi",
+            )
+            return
+
+        category = get_category_by_id(category_id)
+        total_pages = max(
+            1, (len(all_projects) + PROJECTS_PER_PAGE - 1) // PROJECTS_PER_PAGE
+        )
+
+        start = (page - 1) * PROJECTS_PER_PAGE
+        end = start + PROJECTS_PER_PAGE
+        page_projects = all_projects[start:end]
+
+        text = format_project_list(page_projects, category, page, total_pages)
+        kb = self._build_project_keyboard(category_id, page, total_pages, page_projects)
+
+        await edit_message(
+            TELEGRAM_BOT_TOKEN, int(chat_id), message_id, text, reply_markup=kb
+        )
 
     async def _cb_project_detail(
         self,
         chat_id: str,
         message_id: int,
-        index: int,
+        abs_index: int,
         category_id: str,
         page: int,
         callback_id: str,
     ):
         await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
 
-        projects = self.cache.get(category_id, page)
-        if not projects or index >= len(projects):
-            # Re-scrape if cache miss — in background thread
-            loop = asyncio.get_event_loop()
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                projects = await loop.run_in_executor(
-                    executor, scrape_listing, category_id, page
-                )
-            self.cache.store(category_id, page, projects)
-
-        if not projects or index >= len(projects):
+        # Get all projects from cache (stored at page 0)
+        all_projects = self.cache.get(category_id, 0)
+        if not all_projects or abs_index >= len(all_projects):
             await answer_callback(
-                TELEGRAM_BOT_TOKEN, callback_id, text="⚠️ Project tidak ditemukan"
+                TELEGRAM_BOT_TOKEN,
+                callback_id,
+                text="⚠️ Data expired, coba /browse lagi",
             )
             return
 
-        project = projects[index]
-        text = format_project_card(project, index)
+        project = all_projects[abs_index]
+        text = format_project_card(project, abs_index)
 
-        # Back keyboard
+        # Keyboard with View Project button
         kb = {
             "inline_keyboard": [
+                [
+                    {
+                        "text": "🔗 View Project",
+                        "url": project.link,
+                    }
+                ],
                 [
                     {
                         "text": "🔙 Kembali ke List",
@@ -868,7 +895,7 @@ class ProjectsBot:
                 loop = asyncio.get_event_loop()
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     projects = await loop.run_in_executor(
-                        executor, scrape_listing, cat_id, 1
+                        executor, scrape_all_pages, cat_id, 10
                     )
                 for p in projects:
                     self.tracker.mark_seen(p.project_id)

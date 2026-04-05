@@ -324,8 +324,8 @@ def _extract_field(text: str, pattern: str) -> Optional[str]:
     return None
 
 
-def scrape_all_pages(category_id: str = "all", max_pages: int = 3) -> list[Project]:
-    """Scrape multiple pages and return all projects."""
+def scrape_all_pages(category_id: str = "all", max_pages: int = 10) -> list[Project]:
+    """Scrape all pages for a category and return combined projects."""
     all_projects = []
     for page in range(1, max_pages + 1):
         try:
