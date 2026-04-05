@@ -13,6 +13,7 @@ import json
 import logging
 import asyncio
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 from scraper import (
@@ -518,7 +519,10 @@ class ProjectsBot:
             "🔄 <b>Refreshing...</b>\nSedang mengambil project terbaru...",
         )
 
-        projects = scrape_listing("all", 1)
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            projects = await loop.run_in_executor(executor, scrape_listing, "all", 1)
+
         new_projects = [p for p in projects if not self.tracker.is_seen(p.project_id)]
 
         if new_projects:
@@ -653,11 +657,29 @@ class ProjectsBot:
     async def _show_category_page(
         self, chat_id: str, message_id: int, category_id: str, page: int
     ):
-        """Fetch and display a category page."""
+        """Fetch and display a category page. Scraping runs in background thread."""
         category = get_category_by_id(category_id)
 
-        # Scrape
-        projects = scrape_listing(category_id, page)
+        # Show loading state immediately
+        loading_text = f"{category['emoji']} <b>{category['name']}</b>\n\n⏳ <i>Loading projects...</i>"
+        loading_kb = {
+            "inline_keyboard": [[{"text": "⏳ Loading...", "callback_data": "noop"}]]
+        }
+
+        await edit_message(
+            TELEGRAM_BOT_TOKEN,
+            int(chat_id),
+            message_id,
+            loading_text,
+            reply_markup=loading_kb,
+        )
+
+        # Run blocking scrape in background thread
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            projects = await loop.run_in_executor(
+                executor, scrape_listing, category_id, page
+            )
 
         if not projects:
             await edit_message(
@@ -675,29 +697,17 @@ class ProjectsBot:
             )
             return
 
-        # Calculate total pages (estimate: 25 per page from website)
         total_pages = max(
             1, (len(projects) + PROJECTS_PER_PAGE - 1) // PROJECTS_PER_PAGE
         )
-        # Actually the website shows ~25 per page, but we'll paginate our display
-        # For simplicity, show all scraped projects with our own pagination
-        all_projects = projects  # from one page of website
-        total_pages = max(
-            1, (len(all_projects) + PROJECTS_PER_PAGE - 1) // PROJECTS_PER_PAGE
-        )
 
-        # Slice for display
         start = (page - 1) * PROJECTS_PER_PAGE
         end = start + PROJECTS_PER_PAGE
-        page_projects = all_projects[start:end]
+        page_projects = projects[start:end]
 
-        # Cache for project detail callbacks
         self.cache.store(category_id, page, page_projects)
 
-        # Format
         text = format_project_list(page_projects, category, page, total_pages)
-
-        # Build keyboard with project detail buttons
         kb = self._build_project_keyboard(category_id, page, total_pages, page_projects)
 
         await edit_message(
@@ -764,8 +774,12 @@ class ProjectsBot:
 
         projects = self.cache.get(category_id, page)
         if not projects or index >= len(projects):
-            # Re-scrape if cache miss
-            projects = scrape_listing(category_id, page)
+            # Re-scrape if cache miss — in background thread
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                projects = await loop.run_in_executor(
+                    executor, scrape_listing, category_id, page
+                )
             self.cache.store(category_id, page, projects)
 
         if not projects or index >= len(projects):
