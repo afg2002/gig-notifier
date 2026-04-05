@@ -833,10 +833,47 @@ class ProjectsBot:
 
     # ---- Polling Loop ----
 
+    async def _seed_seen_projects(self):
+        """Seed the tracker with existing projects on startup.
+        Prevents spamming notifications for projects that already exist."""
+        if self.tracker.seen_ids:
+            logger.info(
+                f"Tracker already has {len(self.tracker.seen_ids)} seen IDs, skipping seed"
+            )
+            return
+
+        logger.info("Seeding tracker with existing projects...")
+        categories_to_seed = self.monitor.monitored_categories or {"all"}
+
+        for cat_id in categories_to_seed:
+            try:
+                category = get_category_by_id(cat_id)
+                logger.info(f"  Seeding: {category['name']}")
+                loop = asyncio.get_event_loop()
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    projects = await loop.run_in_executor(
+                        executor, scrape_listing, cat_id, 1
+                    )
+                for p in projects:
+                    self.tracker.mark_seen(p.project_id)
+                logger.info(
+                    f"  Seeded {len(projects)} projects from {category['name']}"
+                )
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"  Error seeding {cat_id}: {e}")
+
+        logger.info(
+            f"Seed complete. {len(self.tracker.seen_ids)} projects marked as seen."
+        )
+
     async def start_polling(self):
         """Start the monitoring polling loop."""
         self._running = True
         logger.info(f"Monitoring started. Polling every {POLL_INTERVAL_SECONDS}s")
+
+        # Seed existing projects so we only notify truly new ones
+        await self._seed_seen_projects()
 
         # Send startup notification
         monitored = [
