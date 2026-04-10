@@ -5,10 +5,11 @@ Handles Cloudflare bypass, adaptive element tracking, and category filtering.
 
 import re
 import logging
+import time
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-from curl_cffi import requests
+from curl_cffi import requests as curl_requests
 from scrapling import Selector
 from scrapling.fetchers import StealthyFetcher
 
@@ -18,6 +19,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://projects.co.id"
+
+# --- Retry decorator with exponential backoff ---
+def with_retry(max_attempts: int = 3, base_delay: float = 2.0, max_delay: float = 60.0):
+    """Decorator that retries a function on exception with exponential backoff."""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exc = e
+                    if attempt < max_attempts - 1:
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        logger.warning(
+                            f"[Retry {attempt+1}/{max_attempts}] {func.__name__} "
+                            f"failed: {e}. Waiting {delay:.1f}s..."
+                        )
+                        time.sleep(delay)
+                    else:
+                        logger.error(
+                            f"[Retry {attempt+1}/{max_attempts}] {func.__name__} "
+                            f"failed after all attempts: {e}"
+                        )
+            raise last_exc
+        return wrapper
+    return decorator
+
+# Shared curl_cffi session for connection pooling
+_session = curl_requests.Session(impersonate="chrome120")
 
 # Category definitions: (id, display_name, url_slug, emoji)
 CATEGORIES = [
@@ -175,15 +206,30 @@ def _first(selector_list):
 
 
 def _fetch_html(url: str) -> Selector:
-    """Fetch HTML using curl_cffi with Chrome impersonation.
-    Falls back to StealthyFetcher (browser) if blocked."""
+    """Fetch HTML using curl_cffi session with connection pooling.
+    Falls back to StealthyFetcher (browser) if blocked or rate-limited.
+    Applies retry with exponential backoff on transient failures."""
     try:
-        r = requests.get(url, impersonate="chrome120", timeout=30)
+        r = _session.get(url, timeout=30)
         r.raise_for_status()
-        # Detect Cloudflare challenge page
-        if "cf-chl-bypass" in r.headers or "captcha" in r.text.lower()[:5000]:
+        # Detect Cloudflare challenge or rate limit page
+        text_lower = r.text.lower()[:5000]
+        if "cf-chl-bypass" in r.headers or "captcha" in text_lower:
             raise ValueError("Cloudflare challenge detected")
+        if r.status_code == 429 or "too many requests" in text_lower:
+            raise ValueError("Rate limited (429)")
         return Selector(content=r.text, url=url)
+    except ValueError as e:
+        # Re-raise specific errors for retry handling
+        logger.warning(f"curl_cffi failed ({e}), falling back to StealthyFetcher...")
+        StealthyFetcher.adaptive = True
+        fetched = StealthyFetcher.fetch(
+            url,
+            headless=True,
+            network_idle=True,
+            block_images=True,
+        )
+        return fetched
     except Exception as e:
         logger.warning(f"curl_cffi failed ({e}), falling back to StealthyFetcher...")
         StealthyFetcher.adaptive = True
@@ -196,6 +242,7 @@ def _fetch_html(url: str) -> Selector:
         return fetched
 
 
+@with_retry(max_attempts=3, base_delay=3.0, max_delay=60.0)
 def scrape_listing(category_id: str = "all", page: int = 1) -> list[Project]:
     """
     Scrape projects.co.id listing page for a specific category.
@@ -340,6 +387,49 @@ def _extract_field(text: str, pattern: str) -> Optional[str]:
     if match:
         return _clean_text(match.group(1))
     return None
+
+
+@with_retry(max_attempts=3, base_delay=3.0, max_delay=60.0)
+def scrape_project_detail(project_url: str) -> dict:
+    """
+    Scrape a single project detail page for full description, skills, attachments.
+    Returns dict with enhanced project info for proposal generation.
+    """
+    logger.info(f"Fetching project detail: {project_url}")
+    fetched = _fetch_html(project_url)
+
+    # Extract full description
+    full_description = ""
+    desc_el = _first(fetched.css(".project-description, .col-md-8, .project-detail"))
+    if desc_el:
+        full_description = _clean_text(desc_el.get_all_text())
+
+    # Extract attached skills/tags
+    skills = []
+    for tag_el in fetched.css(".tag.label a, .project-tags a"):
+        skill_text = _clean_text(tag_el.get_all_text())
+        if skill_text:
+            skills.append(skill_text)
+
+    # Extract client info
+    client_name = ""
+    client_el = _first(fetched.css(".user-info .short-username, .project-owner a"))
+    if client_el:
+        client_name = _clean_text(client_el.get_all_text())
+
+    # Extract client rating/review if available
+    client_rating = ""
+    rating_el = _first(fetched.css(".rating, .stars, .review-score"))
+    if rating_el:
+        client_rating = _clean_text(rating_el.get_all_text())
+
+    return {
+        "url": project_url,
+        "description": full_description,
+        "skills": skills,
+        "client_name": client_name,
+        "client_rating": client_rating,
+    }
 
 
 def scrape_all_pages(

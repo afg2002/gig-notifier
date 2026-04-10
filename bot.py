@@ -12,16 +12,23 @@ import os
 import json
 import logging
 import asyncio
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import httpx
 from scraper import (
     scrape_listing,
+    scrape_project_detail,
     CATEGORIES,
     get_category_by_id,
     Project,
 )
+from user_settings import UserSettings, parse_budget_rp
+from proposal_gen import generate_proposal, format_proposal_short
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,8 +37,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Config
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN", "")
+# Support multiple chat IDs (comma-separated)
+_raw_chat_ids = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_IDS = [cid.strip() for cid in _raw_chat_ids.split(",") if cid.strip()]
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL", "300"))  # default 5 min
 PROJECTS_PER_PAGE = int(os.getenv("PROJECTS_PER_PAGE", "10"))
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -43,6 +52,49 @@ os.makedirs(DATA_DIR, exist_ok=True)
 # Telegram API base
 TG_API = "https://api.telegram.org/bot"
 
+# --- Shared HTTP client for connection pooling ---
+_http_client: httpx.AsyncClient | None = None
+
+def get_http_client() -> httpx.AsyncClient:
+    """Get or create the shared httpx AsyncClient with connection pooling."""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=30,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+    return _http_client
+
+async def close_http_client():
+    """Close the shared HTTP client. Call on shutdown."""
+    global _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
+
+# --- Cross-user category cache (avoids re-scraping same category for different users) ---
+# Key: category_id, Value: (projects_list, timestamp)
+_category_cache: dict[str, tuple[list, float]] = {}
+CACHE_TTL_SECONDS = 120  # Cache valid for 2 minutes per poll cycle
+
+def _get_cached_projects(category_id: str) -> list | None:
+    """Return cached projects for a category if still fresh, else None."""
+    if category_id in _category_cache:
+        projects, ts = _category_cache[category_id]
+        if time.time() - ts < CACHE_TTL_SECONDS:
+            return projects
+    return None
+
+def _set_cached_projects(category_id: str, projects: list):
+    """Cache projects for a category."""
+    _category_cache[category_id] = (projects, time.time())
+
+def _clear_category_cache():
+    """Clear the cross-user category cache at the start of each poll cycle."""
+    global _category_cache
+    _category_cache = {}
+
+
 
 # ============================================================
 # Data Persistence
@@ -50,20 +102,33 @@ TG_API = "https://api.telegram.org/bot"
 
 
 class SeenTracker:
-    """Persistently tracks which project IDs have been notified."""
+    """Persistently tracks which project IDs have been notified, per-user."""
 
-    def __init__(self, data_file: str):
-        self.data_file = data_file
+    def __init__(self, chat_id: str | None = None, data_file: str | None = None):
+        self.chat_id = chat_id
+        if data_file:
+            self.data_file = data_file
+        elif chat_id:
+            user_dir = os.path.join(DATA_DIR, str(chat_id))
+            os.makedirs(user_dir, exist_ok=True)
+            self.data_file = os.path.join(user_dir, "seen_projects.json")
+        else:
+            self.data_file = SEEN_FILE
         self.seen_ids: set[str] = set()
         self._load()
 
     def _load(self):
         if os.path.exists(self.data_file):
-            with open(self.data_file, "r") as f:
-                self.seen_ids = set(json.load(f))
-            logger.info(f"Loaded {len(self.seen_ids)} seen project IDs")
+            try:
+                with open(self.data_file, "r") as f:
+                    self.seen_ids = set(json.load(f))
+                logger.info(f"Loaded {len(self.seen_ids)} seen project IDs for {self.chat_id or 'global'}")
+            except (json.JSONDecodeError,) as e:
+                logger.error(f"Error loading seen projects: {e}")
+                self.seen_ids = set()
 
     def _save(self):
+        os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
         with open(self.data_file, "w") as f:
             json.dump(list(self.seen_ids), f, indent=2)
 
@@ -76,21 +141,34 @@ class SeenTracker:
 
 
 class MonitorConfig:
-    """Manages per-category monitoring configuration."""
+    """Manages per-category monitoring configuration, per-user aware."""
 
-    def __init__(self, data_file: str):
-        self.data_file = data_file
+    def __init__(self, chat_id: str | None = None, data_file: str | None = None):
+        self.chat_id = chat_id
+        if data_file:
+            self.data_file = data_file
+        elif chat_id:
+            user_dir = os.path.join(DATA_DIR, str(chat_id))
+            os.makedirs(user_dir, exist_ok=True)
+            self.data_file = os.path.join(user_dir, "monitor_config.json")
+        else:
+            self.data_file = MONITOR_FILE  # global fallback
         self.monitored_categories: set[str] = set()
         self._load()
 
     def _load(self):
         if os.path.exists(self.data_file):
-            with open(self.data_file, "r") as f:
-                data = json.load(f)
-                self.monitored_categories = set(data.get("categories", []))
-            logger.info(f"Loaded monitor config: {self.monitored_categories}")
+            try:
+                with open(self.data_file, "r") as f:
+                    data = json.load(f)
+                    self.monitored_categories = set(data.get("categories", []))
+                logger.info(f"Loaded monitor config for {self.chat_id or 'global'}: {self.monitored_categories}")
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.error(f"Error loading monitor config: {e}")
+                self.monitored_categories = set()
 
     def _save(self):
+        os.makedirs(os.path.dirname(self.data_file), exist_ok=True)
         with open(self.data_file, "w") as f:
             json.dump({"categories": list(self.monitored_categories)}, f, indent=2)
 
@@ -108,6 +186,11 @@ class MonitorConfig:
             self._save()
             return True
 
+    def set_all(self, category_ids: list[str]):
+        """Set all monitored categories at once."""
+        self.monitored_categories = set(category_ids)
+        self._save()
+
 
 # ============================================================
 # Telegram API Helpers
@@ -115,11 +198,11 @@ class MonitorConfig:
 
 
 async def tg_request(token: str, method: str, payload: dict) -> dict:
-    """Make a request to Telegram Bot API."""
+    """Make a request to Telegram Bot API using shared connection pool."""
     url = f"{TG_API}{token}/{method}"
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(url, json=payload)
-        return response.json()
+    client = get_http_client()
+    response = await client.post(url, json=payload)
+    return response.json()
 
 
 async def send_message(
@@ -143,6 +226,28 @@ async def send_message(
     if not result.get("ok"):
         logger.error(f"Telegram API error: {result}")
     return result
+
+
+async def broadcast_message(
+    token: str,
+    chat_ids: list[str],
+    text: str,
+    reply_markup: dict | None = None,
+    parse_mode: str = "HTML",
+    delay: float = 0.1,
+) -> dict:
+    """Send a message to multiple chat IDs."""
+    results = {}
+    for chat_id in chat_ids:
+        try:
+            result = await send_message(token, chat_id, text, reply_markup, parse_mode)
+            results[chat_id] = result
+            if delay > 0 and chat_id != chat_ids[-1]:
+                await asyncio.sleep(delay)  # Rate limiting between sends
+        except Exception as e:
+            logger.error(f"Failed to send to {chat_id}: {e}")
+            results[chat_id] = {"ok": False, "error": str(e)}
+    return results
 
 
 async def edit_message(
@@ -400,13 +505,24 @@ class ProjectCache:
 
 
 class ProjectsBot:
-    """Interactive Telegram bot for projects.co.id."""
+    """Interactive Telegram bot for projects.co.id with per-user settings."""
 
     def __init__(self):
-        self.tracker = SeenTracker(SEEN_FILE)
-        self.monitor = MonitorConfig(MONITOR_FILE)
+        # Global instances for startup/seeding only — not used for per-user ops
+        self.tracker = SeenTracker()  # global seen tracker (legacy)
+        self.monitor = MonitorConfig()  # global monitor config (legacy)
         self.cache = ProjectCache()
         self._running = False
+
+    # Per-user instance factories
+    def _settings(self, chat_id: str) -> UserSettings:
+        return UserSettings(chat_id=chat_id)
+
+    def _monitor(self, chat_id: str) -> MonitorConfig:
+        return MonitorConfig(chat_id=chat_id)
+
+    def _tracker(self, chat_id: str) -> SeenTracker:
+        return SeenTracker(chat_id=chat_id)
 
     async def handle_update(self, update: dict):
         """Route incoming updates to appropriate handlers."""
@@ -437,6 +553,14 @@ class ProjectsBot:
             await self._cmd_help(chat_id)
         elif text == "/status":
             await self._cmd_status(chat_id)
+        elif text.startswith("/keyword") or text.startswith("/keywords"):
+            await self._cmd_keyword(chat_id, text)
+        elif text.startswith("/skill") or text.startswith("/skills"):
+            await self._cmd_skill(chat_id, text)
+        elif text.startswith("/budget"):
+            await self._cmd_budget(chat_id, text)
+        elif text.startswith("/propose") or text.startswith("/proposal"):
+            await self._cmd_propose(chat_id, text, message)
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
@@ -515,12 +639,13 @@ class ProjectsBot:
         await self._cb_category_list(chat_id, None, None)
 
     async def _cmd_monitor(self, chat_id: str):
-        status_text = format_monitor_status(self.monitor)
+        monitor = self._monitor(chat_id)
+        status_text = format_monitor_status(monitor)
         await send_message(
             TELEGRAM_BOT_TOKEN,
             chat_id,
             status_text,
-            reply_markup=build_monitor_keyboard(self.monitor),
+            reply_markup=build_monitor_keyboard(monitor),
         )
 
     async def _cmd_refresh(self, chat_id: str):
@@ -534,14 +659,15 @@ class ProjectsBot:
         with ThreadPoolExecutor(max_workers=2) as executor:
             projects = await loop.run_in_executor(executor, scrape_listing, "all", 1)
 
-        new_projects = [p for p in projects if not self.tracker.is_seen(p.project_id)]
+        tracker = self._tracker(chat_id)
+        new_projects = [p for p in projects if not tracker.is_seen(p.project_id)]
 
         if new_projects:
             text = f"🆕 <b>{len(new_projects)} Project Baru Ditemukan!</b>\n\n"
             for i, p in enumerate(reversed(new_projects[:10])):
                 text += format_project_card(p, i)
                 text += "\n"
-                self.tracker.mark_seen(p.project_id)
+                tracker.mark_seen(p.project_id)
 
             if len(new_projects) > 10:
                 text += f"\n...dan {len(new_projects) - 10} project lainnya."
@@ -588,14 +714,221 @@ class ProjectsBot:
         )
 
     async def _cmd_status(self, chat_id: str):
+        monitor = self._monitor(chat_id)
         await send_message(
             TELEGRAM_BOT_TOKEN,
             chat_id,
-            format_monitor_status(self.monitor),
+            format_monitor_status(monitor),
             reply_markup=build_main_menu_keyboard(),
         )
 
-    # ---- Callback Handlers ----
+    # ---- Smart Feature Commands ----
+
+    async def _cmd_keyword(self, chat_id: str, text: str):
+        """Manage keyword alerts: /keyword add Laravel /keyword remove Laravel /keyword list"""
+        settings = self._settings(chat_id)
+        parts = text.split(None, 2)
+        if len(parts) < 2:
+            kw_list = "\n".join(f"  🔖 {k}" for k in settings.keywords) if settings.keywords else "  ⬜ Belum ada keyword"
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                f"🔖 <b>Keyword Alerts</b>\n\n"
+                f"Daftar keyword yang dipantau:\n\n{kw_list}\n\n"
+                f"<b>Cara Pakai:</b>\n"
+                f"/keyword add Laravel\n"
+                f"/keyword remove Laravel\n"
+                f"/keyword clear — Hapus semua\n"
+                f"/keyword list — Lihat daftar",
+            )
+            return
+        action = parts[1].lower()
+        if action == "add" and len(parts) >= 3:
+            kw = parts[2].strip()
+            if settings.add_keyword(kw):
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id, f"✅ Keyword ditambahkan: <b>{kw}</b>")
+            else:
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id, f"⚠️ Keyword sudah ada: <b>{kw}</b>")
+        elif action == "remove" and len(parts) >= 3:
+            kw = parts[2].strip()
+            if settings.remove_keyword(kw):
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id, f"🗑️ Keyword dihapus: <b>{kw}</b>")
+            else:
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id, f"❌ Keyword tidak ditemukan: <b>{kw}</b>")
+        elif action == "clear":
+            settings.clear_keywords()
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, "🗑️ Semua keyword dihapus")
+        elif action == "list":
+            kw_list = "\n".join(f"  🔖 {k}" for k in settings.keywords) if settings.keywords else "  ⬜ Belum ada keyword"
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                f"🔖 <b>Keyword Alerts</b>\n\n{kw_list}",
+            )
+
+    async def _cmd_skill(self, chat_id: str, text: str):
+        """Manage skills matching: /skill add Laravel /skill remove Laravel /skill list"""
+        settings = self._settings(chat_id)
+        parts = text.split(None, 2)
+        if len(parts) < 2:
+            sk_list = "\n".join(f"  ⚡ {s}" for s in settings.skills) if settings.skills else "  ⬜ Belum ada skill"
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                f"⚡ <b>Skills Matching</b>\n\n"
+                f"Skills yang kamu punya:\n\n{sk_list}\n\n"
+                f"Bot akan memberi score match untuk setiap project.\n\n"
+                f"<b>Cara Pakai:</b>\n"
+                f"/skill add Laravel\n"
+                f"/skill add Python\n"
+                f"/skill remove Laravel\n"
+                f"/skill clear — Hapus semua\n"
+                f"/skill list — Lihat daftar",
+            )
+            return
+        action = parts[1].lower()
+        if action == "add" and len(parts) >= 3:
+            sk = parts[2].strip()
+            if settings.add_skill(sk):
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id, f"✅ Skill ditambahkan: <b>{sk}</b>")
+            else:
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id, f"⚠️ Skill sudah ada: <b>{sk}</b>")
+        elif action == "remove" and len(parts) >= 3:
+            sk = parts[2].strip()
+            if settings.remove_skill(sk):
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id, f"🗑️ Skill dihapus: <b>{sk}</b>")
+            else:
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id, f"❌ Skill tidak ditemukan: <b>{sk}</b>")
+        elif action == "clear":
+            settings.clear_skills()
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, "🗑️ Semua skill dihapus")
+        elif action == "list":
+            sk_list = "\n".join(f"  ⚡ {s}" for s in settings.skills) if settings.skills else "  ⬜ Belum ada skill"
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                f"⚡ <b>Skills Matching</b>\n\n{sk_list}",
+            )
+
+    async def _cmd_budget(self, chat_id: str, text: str):
+        """Set minimum budget filter: /budget set 1000000 /budget clear"""
+        settings = self._settings(chat_id)
+        parts = text.split(None, 2)
+        if len(parts) < 2 or (len(parts) >= 2 and parts[1].lower() in ("clear", "off")):
+            settings.clear_min_budget()
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                "💰 <b>Budget Filter</b>\n\n"
+                "✅ Filter budget dinonaktifkan\n"
+                "Semua project akan ditampilkan.\n\n"
+                "Set minimum budget: /budget set 1000000",
+            )
+            return
+        action = parts[1].lower()
+        if action == "set" and len(parts) >= 3:
+            try:
+                amount = int(parts[2].replace(".", "").replace(",", ""))
+                if amount <= 0:
+                    raise ValueError
+                settings.set_min_budget(amount)
+                formatted = f"Rp {amount:,}".replace(",", ".")
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                    f"💰 <b>Budget Filter</b>\n\n"
+                    f"✅ Minimum budget diset: <b>{formatted}</b>\n"
+                    f"Project di bawah {formatted} akan diabaikan.",
+                )
+            except ValueError:
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                    "❌ Format salah. Gunakan angka murni.\n"
+                    "Contoh: /budget set 1000000",
+                )
+        elif action == "status":
+            if settings.min_budget > 0:
+                formatted = f"Rp {settings.min_budget:,}".replace(",", ".")
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                    f"💰 <b>Budget Filter</b>\n\n"
+                    f"Minimum budget: <b>{formatted}</b>",
+                )
+            else:
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                    "💰 <b>Budget Filter</b> — Nonaktif",
+                )
+
+    async def _cmd_propose(self, chat_id: str, text: str, message: dict):
+        """Generate proposal: reply a project card with /propose"""
+        parts = text.split(None, 1)
+        lang = "id"
+        if len(parts) >= 2:
+            lang = "en" if parts[1].lower() in ("en", "english") else "id"
+
+        # Check if replying to a project notification
+        reply_to = message.get("reply_to_message", {})
+        if not reply_to:
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                "📝 <b>Proposal Generator</b>\n\n"
+                "Reply project notification dengan:\n"
+                "/propose — Bahasa Indonesia\n"
+                "/propose en — English\n\n"
+                f"Language aktif: {'English' if lang == 'en' else 'Bahasa Indonesia'}",
+            )
+            return
+
+        reply_text = reply_to.get("text", "")
+
+        # Extract project title from replied message
+        title_match = re.search(r"▸?\s?\*?\*?(.+?)\*?\*?\s*\n", reply_text)
+        if not title_match:
+            title_match = re.search(r"<b>([^<]+)</b>", reply_text)
+        project_title = title_match.group(1) if title_match else "Project Anda"
+
+        # Extract budget
+        budget_match = re.search(r"💰\s*(.+?)(?:\s*•|$)", reply_text)
+        project_budget = budget_match.group(1).strip() if budget_match else ""
+
+        # Extract skills from hashtags or tags
+        skills_match = re.findall(r"#[\w]+", reply_text)
+        project_skills = ", ".join(s.replace("#", "") for s in skills_match)
+
+        # Extract deadline
+        deadline_match = re.search(r"📅\s*(.+?)(?:\s*•|$)", reply_text)
+        project_deadline = deadline_match.group(1).strip() if deadline_match else ""
+
+        # Send placeholder
+        await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+            f"📝 <b>Generating proposal...</b>\n\n"
+            f"📌 {project_title}\n"
+            f"💰 {project_budget or '-'}\n"
+            f"🌐 {'English' if lang == 'en' else 'Bahasa Indonesia'}"
+        )
+
+        # Scrape full project detail
+        link_match = re.search(r"https?://[^\s<>\"']+", reply_text)
+        project_url = link_match.group(0) if link_match else None
+
+        full_desc = ""
+        full_skills = []
+        if project_url:
+            try:
+                loop = asyncio.get_event_loop()
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    detail = await loop.run_in_executor(
+                        executor, scrape_project_detail, project_url
+                    )
+                full_desc = detail.get("description", "")
+                full_skills = detail.get("skills", [])
+                if full_skills:
+                    project_skills = ", ".join(full_skills)
+            except Exception as e:
+                logger.warning(f"Proposal detail scrape failed: {e}")
+
+        # Generate proposal
+        proposal = generate_proposal(
+            project_title=project_title,
+            project_description=full_desc,
+            project_budget=project_budget,
+            project_deadline=project_deadline,
+            project_skills=project_skills,
+            language=lang,
+        )
+
+        # Send proposal
+        await send_message(
+            TELEGRAM_BOT_TOKEN,
+            chat_id,
+            f"📝 <b>Proposal — {project_title}</b>\n\n"
+            f"<pre>{proposal}</pre>",
+        )
 
     async def _cb_menu(
         self, chat_id: str, message_id: int, action: str, callback_id: str
@@ -613,12 +946,13 @@ class ProjectsBot:
         elif action == "browse":
             await self._cb_category_list(chat_id, message_id, callback_id)
         elif action == "monitor":
+            monitor = self._monitor(chat_id)
             await edit_message(
                 TELEGRAM_BOT_TOKEN,
                 int(chat_id),
                 message_id,
-                format_monitor_status(self.monitor),
-                reply_markup=build_monitor_keyboard(self.monitor),
+                format_monitor_status(monitor),
+                reply_markup=build_monitor_keyboard(monitor),
             )
         elif action == "refresh":
             await self._cmd_refresh(chat_id)
@@ -915,7 +1249,8 @@ class ProjectsBot:
     async def _cb_monitor_toggle(
         self, chat_id: str, message_id: int, category_id: str, callback_id: str
     ):
-        is_now_on = self.monitor.toggle(category_id)
+        monitor = self._monitor(chat_id)
+        is_now_on = monitor.toggle(category_id)
         category = get_category_by_id(category_id)
 
         status = "DIAKTIFKAN ✅" if is_now_on else "DINONAKTIFKAN ⬜"
@@ -931,15 +1266,16 @@ class ProjectsBot:
             TELEGRAM_BOT_TOKEN,
             int(chat_id),
             message_id,
-            format_monitor_status(self.monitor),
-            reply_markup=build_monitor_keyboard(self.monitor),
+            format_monitor_status(monitor),
+            reply_markup=build_monitor_keyboard(monitor),
         )
 
     # ---- Polling Loop ----
 
     async def _seed_seen_projects(self):
         """Seed the tracker with existing projects on startup.
-        Prevents spamming notifications for projects that already exist."""
+        Prevents spamming notifications for projects that already exist.
+        Uses parallel scraping for all categories simultaneously."""
         if self.tracker.seen_ids:
             logger.info(
                 f"Tracker already has {len(self.tracker.seen_ids)} seen IDs, skipping seed"
@@ -949,134 +1285,223 @@ class ProjectsBot:
         logger.info("Seeding tracker with existing projects...")
         categories_to_seed = self.monitor.monitored_categories or {"all"}
 
-        for cat_id in categories_to_seed:
+        loop = asyncio.get_event_loop()
+
+        def seed_one_category(cat_id: str) -> tuple[str, list]:
+            """Scrape all pages for a category and return (cat_id, project_list)."""
+            from scraper import scrape_all_pages
             try:
-                category = get_category_by_id(cat_id)
-                logger.info(f"  Seeding: {category['name']}")
-                loop = asyncio.get_event_loop()
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    # Fetch all pages for seeding
-                    all_projects = []
-                    for pg in range(1, 11):
-                        page_projects = await loop.run_in_executor(
-                            executor, scrape_listing, cat_id, pg
-                        )
-                        all_projects.extend(page_projects)
-                        if not page_projects:
-                            break
-                for p in all_projects:
-                    self.tracker.mark_seen(p.project_id)
-                logger.info(
-                    f"  Seeded {len(all_projects)} projects from {category['name']}"
-                )
-                await asyncio.sleep(1)
+                projects = scrape_all_pages(cat_id, max_pages=10)
+                return (cat_id, projects)
             except Exception as e:
                 logger.error(f"  Error seeding {cat_id}: {e}")
+                return (cat_id, [])
+
+        # Parallel seed all categories at once — scrape ONCE per category
+        with ThreadPoolExecutor(max_workers=min(len(categories_to_seed), 8)) as executor:
+            futures = [
+                loop.run_in_executor(executor, seed_one_category, cat_id)
+                for cat_id in categories_to_seed
+            ]
+            for fut in asyncio.as_completed(futures):
+                cat_id, projects = await fut
+                category = get_category_by_id(cat_id)
+                logger.info(f"  Seeded {len(projects)} projects from {category['name']}")
+                for p in projects:
+                    self.tracker.mark_seen(p.project_id)
 
         logger.info(
             f"Seed complete. {len(self.tracker.seen_ids)} projects marked as seen."
         )
 
     async def start_polling(self):
-        """Start the monitoring polling loop."""
+        """Start the monitoring polling loop — per-user notifications.
+
+        Optimizations applied:
+        - Cross-user category cache: same category scraped once, shared across users
+        - Parallel category scraping: all monitored categories scraped concurrently
+        - ALL pages fetched per category (up to 10 pages), not just page 1
+        - Deduplication per poll cycle: each project notified at most once per cycle
+        - Per-user seen tracking and filtering
+        """
         self._running = True
         logger.info(f"Monitoring started. Polling every {POLL_INTERVAL_SECONDS}s")
 
-        # Seed existing projects so we only notify truly new ones
+        # Seed existing projects so we only notify truly new ones (per-user)
         await self._seed_seen_projects()
 
-        # Send startup notification
-        monitored = [
-            c for c in CATEGORIES if c["id"] in self.monitor.monitored_categories
-        ]
-        cat_list = "\n".join(f"  {c['emoji']} {c['name']}" for c in monitored)
-
-        await send_message(
-            TELEGRAM_BOT_TOKEN,
-            TELEGRAM_CHAT_ID,
-            "🤖 <b>Projects.co.id Bot Active!</b>\n\n"
-            f"⏱️ Polling: setiap <b>{POLL_INTERVAL_SECONDS}s</b>\n"
-            f"📄 Projects/page: <b>{PROJECTS_PER_PAGE}</b>\n"
-            f"🔔 Monitoring <b>{len(monitored)}</b> kategori:\n\n"
-            f"{cat_list or '  ⬜ Belum ada kategori yang dimonitor'}\n\n"
-            "Gunakan /monitor untuk mengubah konfigurasi.",
-            reply_markup=build_main_menu_keyboard(),
-        )
+        # Send startup notification to each user with their own categories
+        for chat_id in TELEGRAM_CHAT_IDS:
+            try:
+                monitor = self._monitor(chat_id)
+                settings = self._settings(chat_id)
+                monitored = [
+                    c for c in CATEGORIES if c["id"] in monitor.monitored_categories
+                ]
+                cat_list = "\n".join(f"  {c['emoji']} {c['name']}" for c in monitored)
+                await send_message(
+                    TELEGRAM_BOT_TOKEN,
+                    chat_id,
+                    "🤖 <b>Projects.co.id Bot Active!</b>\n\n"
+                    f"⏱️ Polling: setiap <b>{POLL_INTERVAL_SECONDS}s</b>\n"
+                    f"📄 Projects/page: <b>{PROJECTS_PER_PAGE}</b>\n"
+                    f"🔔 Monitoring <b>{len(monitored)}</b> kategori:\n\n"
+                    f"{cat_list or '  ⬜ Belum ada kategori yang dimonitor'}\n\n"
+                    "Gunakan /monitor untuk mengubah konfigurasi.",
+                    reply_markup=build_main_menu_keyboard(),
+                )
+            except Exception as e:
+                logger.error(f"Failed startup notify to {chat_id}: {e}")
 
         while self._running:
             try:
-                if not self.monitor.monitored_categories:
+                # ── Clear cross-user category cache at the start of each poll cycle ──
+                _clear_category_cache()
+
+                # ── Collect all unique monitored categories across ALL users ──
+                all_monitored_cats: set[str] = set()
+                for chat_id in TELEGRAM_CHAT_IDS:
+                    monitor = self._monitor(chat_id)
+                    if monitor.monitored_categories:
+                        all_monitored_cats.update(monitor.monitored_categories)
+
+                if not all_monitored_cats:
+                    logger.info("No categories monitored, skipping poll cycle")
                     await asyncio.sleep(POLL_INTERVAL_SECONDS)
                     continue
 
-                for cat_id in self.monitor.monitored_categories:
+                # ── Parallel scrape ALL categories using thread pool ──
+                # Each category is scraped by ONE worker; result is cached for all users
+                logger.info(f"Scraping {len(all_monitored_cats)} categories in parallel...")
+                loop = asyncio.get_event_loop()
+
+                def scrape_cat_sequential(cat_id: str) -> tuple[str, list]:
+                    """Scrape ALL pages for a category sequentially (but categories run in parallel)."""
+                    from scraper import scrape_all_pages
+                    all_projects = scrape_all_pages(cat_id, max_pages=10)
+                    return (cat_id, all_projects)
+
+                with ThreadPoolExecutor(max_workers=min(len(all_monitored_cats), 8)) as executor:
+                    cat_futures = [
+                        loop.run_in_executor(executor, scrape_cat_sequential, cat_id)
+                        for cat_id in all_monitored_cats
+                    ]
+                    cat_results: dict[str, list] = {}
+                    for fut in asyncio.as_completed(cat_futures):
+                        cat_id, projects = await fut
+                        cat_results[cat_id] = projects
+                        logger.info(f"  Scraped {len(projects)} projects from {cat_id}")
+
+                # ── Now dispatch per-user notifications ──
+                for chat_id in TELEGRAM_CHAT_IDS:
                     if not self._running:
                         break
 
-                    category = get_category_by_id(cat_id)
-                    logger.info(f"Polling: {category['name']}")
+                    monitor = self._monitor(chat_id)
+                    tracker = self._tracker(chat_id)
 
-                    projects = scrape_listing(cat_id, 1)
-                    # Only notify projects that are both unseen AND published today
-                    new_projects = [
-                        p
-                        for p in projects
-                        if not self.tracker.is_seen(p.project_id)
-                        and _is_published_today(p.published_date)
-                    ]
+                    if not monitor.monitored_categories:
+                        continue
 
-                    if new_projects:
-                        logger.info(f"🆕 {len(new_projects)} new in {category['name']}")
+                    # Collect all new projects for this user across their categories
+                    user_new_projects: list[tuple[str, Project]] = (
+                        []
+                    )  # (category_id, project)
 
-                        # Send notification
+                    for cat_id in monitor.monitored_categories:
+                        if cat_id not in cat_results:
+                            continue
+                        projects = cat_results[cat_id]
+                        # Filter: unseen by THIS user AND published today
+                        for p in projects:
+                            if not tracker.is_seen(p.project_id) and _is_published_today(
+                                p.published_date
+                            ):
+                                user_new_projects.append((cat_id, p))
+
+                    if not user_new_projects:
+                        logger.info(f"[{chat_id}] No new projects")
+                        continue
+
+                    # Sort by publish date (newest first)
+                    user_new_projects.sort(
+                        key=lambda x: x[1].published_date or "", reverse=True
+                    )
+
+                    logger.info(
+                        f"[{chat_id}] 🆕 {len(user_new_projects)} new projects across "
+                        f"{len(monitor.monitored_categories)} categories"
+                    )
+
+                    # Notify in groups by category for clarity
+                    by_category: dict[str, list[Project]] = {}
+                    for cat_id, proj in user_new_projects:
+                        by_category.setdefault(cat_id, []).append(proj)
+
+                    for cat_id, projs in by_category.items():
+                        category = get_category_by_id(cat_id)
                         cat_emoji = category["emoji"]
+                        cat_name = category["name"]
+
                         header = (
-                            f"🆕 <b>{len(new_projects)} Project Baru</b> "
-                            f"di {cat_emoji} <b>{category['name']}</b>!\n\n"
+                            f"🆕 <b>{len(projs)} Project Baru</b> "
+                            f"di {cat_emoji} <b>{cat_name}</b>!\n\n"
                         )
 
-                        for i, p in enumerate(new_projects[:5]):
+                        for i, p in enumerate(projs[:5]):
                             bid_count = (
                                 int(p.bid_count)
                                 if p.bid_count and p.bid_count.isdigit()
                                 else 0
                             )
                             bid_emoji = (
-                                "🔥"
-                                if bid_count > 20
-                                else "👥"
-                                if bid_count > 5
+                                "🔥" if bid_count > 20
+                                else "👥" if bid_count > 5
                                 else "🆕"
                             )
-
-                            msg = (
+                            text = (
+                                f"{header if i == 0 else ''}"
                                 f"<b>▸ {p.title}</b>\n"
                                 f"   💰 {p.budget or '-'}  •  "
                                 f"{bid_emoji} {p.bid_count or '0'} bids  •  "
                                 f"📅 {p.published_date or '-'}\n"
-                                f"   🔗 <a href='{p.link}'>View →</a>\n"
                             )
+                            # Inline keyboard with View Project button
+                            reply_markup = {
+                                "inline_keyboard": [
+                                    [
+                                        {
+                                            "text": "🔗 View Project",
+                                            "url": p.link,
+                                        }
+                                    ]
+                                ]
+                            }
                             await send_message(
                                 TELEGRAM_BOT_TOKEN,
-                                TELEGRAM_CHAT_ID,
-                                header + msg if i == 0 else msg,
+                                chat_id,
+                                text,
+                                reply_markup=reply_markup,
                             )
-                            self.tracker.mark_seen(p.project_id)
-                            await asyncio.sleep(0.5)
+                            tracker.mark_seen(p.project_id)
+                            await asyncio.sleep(0.3)
 
-                        if len(new_projects) > 5:
+                        if len(projs) > 5:
                             await send_message(
                                 TELEGRAM_BOT_TOKEN,
-                                TELEGRAM_CHAT_ID,
-                                f"...dan <b>{len(new_projects) - 5}</b> project lainnya. "
+                                chat_id,
+                                f"...dan <b>{len(projs) - 5}</b> project lainnya di "
+                                f"{cat_emoji} {cat_name}. "
                                 f"Gunakan /browse untuk lihat semua.",
                             )
 
-                    await asyncio.sleep(2)  # Delay between categories
+                        await asyncio.sleep(1)
+
+                    await asyncio.sleep(2)
 
             except Exception as e:
                 logger.error(f"Polling error: {e}")
-                await asyncio.sleep(30)  # Wait before retry
+                await asyncio.sleep(30)
 
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
@@ -1091,16 +1516,16 @@ class ProjectsBot:
 
 
 async def fetch_updates(token: str, offset: int = 0, timeout: int = 30) -> dict:
-    """Fetch updates via long polling."""
+    """Fetch updates via long polling using shared connection pool."""
     url = f"{TG_API}{token}/getUpdates"
     payload = {
         "offset": offset,
         "timeout": timeout,
         "allowed_updates": ["message", "callback_query"],
     }
-    async with httpx.AsyncClient(timeout=timeout + 10) as client:
-        response = await client.post(url, json=payload)
-        return response.json()
+    client = get_http_client()
+    response = await client.post(url, json=payload)
+    return response.json()
 
 
 async def main():
@@ -1133,10 +1558,12 @@ async def main():
         logger.info("Bot stopped by user")
         bot.stop()
         monitor_task.cancel()
+        await close_http_client()
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         bot.stop()
         monitor_task.cancel()
+        await close_http_client()
         raise
 
 
