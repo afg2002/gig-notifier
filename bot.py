@@ -9,13 +9,14 @@ Features:
 """
 
 import os
+import sys
 import json
 import logging
 import asyncio
+import fcntl
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-import httpx
 from scraper import (
     scrape_listing,
     CATEGORIES,
@@ -115,11 +116,31 @@ class MonitorConfig:
 
 
 async def tg_request(token: str, method: str, payload: dict) -> dict:
-    """Make a request to Telegram Bot API."""
+    """Make a request to Telegram Bot API using stdlib urllib."""
+    import urllib.request
+    import urllib.error
+
     url = f"{TG_API}{token}/{method}"
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(url, json=payload)
-        return response.json()
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "TelegramBot/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode())
+        except Exception:
+            return {"ok": False, "error_code": e.code, "description": f"HTTP {e.code}"}
+    except Exception as e:
+        logger.error(f"Telegram request error: {e}")
+        return {"ok": False, "error": str(e)}
 
 
 async def send_message(
@@ -1016,7 +1037,12 @@ class ProjectsBot:
                     category = get_category_by_id(cat_id)
                     logger.info(f"Polling: {category['name']}")
 
-                    projects = scrape_listing(cat_id, 1)
+                    # Run sync scrape in thread pool to avoid asyncio conflict
+                    loop = asyncio.get_event_loop()
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        projects = await loop.run_in_executor(
+                            executor, scrape_listing, cat_id, 1
+                        )
                     # Only notify projects that are both unseen AND published today
                     new_projects = [
                         p
@@ -1091,16 +1117,32 @@ class ProjectsBot:
 
 
 async def fetch_updates(token: str, offset: int = 0, timeout: int = 30) -> dict:
-    """Fetch updates via long polling."""
+    """Fetch updates via long polling using stdlib urllib."""
+    import urllib.request
+    import urllib.error
+
     url = f"{TG_API}{token}/getUpdates"
     payload = {
         "offset": offset,
         "timeout": timeout,
         "allowed_updates": ["message", "callback_query"],
     }
-    async with httpx.AsyncClient(timeout=timeout + 10) as client:
-        response = await client.post(url, json=payload)
-        return response.json()
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "TelegramBot/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout + 10) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode())
+        except Exception:
+            return {"ok": False, "result": []}
+    except Exception as e:
+        logger.error(f"fetch_updates error: {e}")
+        return {"ok": False, "result": []}
 
 
 async def main():
@@ -1141,4 +1183,13 @@ async def main():
 
 
 if __name__ == "__main__":
+    # Lock file to prevent duplicate instances
+    lock_path = os.path.join(os.path.dirname(__file__), "bot.lock")
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("ERROR: Bot is already running! Exiting.")
+        sys.exit(1)
+
     asyncio.run(main())

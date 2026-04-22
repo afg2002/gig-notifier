@@ -3,3 +3,11 @@ data/*.json
 __pycache__/
 *.pyc
 tmp_*.html
+data/
+
+# Bot lock file (prevents duplicate instances)
+bot.lock
+
+# Session/tracking data
+*.sqlite
+*.db
