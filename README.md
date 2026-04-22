@@ -9,17 +9,11 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Telegram](https://img.shields.io/badge/Built%20for-Telegram-26A5E4.svg)](https://telegram.org)
 [![Scrapling](https://img.shields.io/badge/Powered%20by-Scrapling-orange.svg)](https://github.com/D4Vinci/Scrapling)
-[![Status](https://img.shields.io/badge/Status-Education%20Only-yellow.svg)](#disclaimer)
+|[![Status](https://img.shields.io/badge/Status-Active-green.svg)](#)
 
 </div>
 
----
 
-## ⚠️ Disclaimer
-
-**This project is for educational purposes only.** The code demonstrates web scraping techniques, interactive bot development, and async programming patterns. The authors are not responsible for any misuse of this software. Always respect websites' Terms of Service, `robots.txt`, and applicable laws. Use responsibly and at your own risk.
-
----
 
 ## ✨ Features
 
@@ -213,9 +207,4 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 - [Patchright](https://github.com/D4Vinci/patchright) — Stealth browser automation
 - [Telegram Bot API](https://core.telegram.org/bots/api) — Bot platform
 
----
 
-<div align="center">
-  <sub>Built for educational purposes. Use responsibly.</sub>
-</div>
->>>>>>> cd20192 (feat: initial commit - interactive Telegram freelance project notifier)
