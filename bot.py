@@ -24,6 +24,13 @@ from scraper import (
     Project,
 )
 
+from fastwork_scraper import (
+    scrape_jobs as scrape_fastwork_jobs,
+    get_categories as get_fastwork_categories,
+    scrape_all_pages as scrape_fastwork_all_pages,
+    FastworkJob,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -542,15 +549,37 @@ def _is_published_today(published_date: str) -> bool:
 
 
 def build_main_menu_keyboard() -> dict:
-    """Build the main menu inline keyboard."""
+    """Build the main menu inline keyboard — source selector."""
     return {
         "inline_keyboard": [
-            [{"text": "📋 Browse Projects", "callback_data": "menu:browse"}],
-            [{"text": "🔔 Monitor Settings", "callback_data": "menu:monitor"}],
-            [{"text": "🔄 Refresh Now", "callback_data": "menu:refresh"}],
-            [{"text": "ℹ️ Help", "callback_data": "menu:help"}],
+            [{"text": "🌐 Projects.co.id", "callback_data": "src:projects"}],
+            [{"text": "⚡ Fastwork.id", "callback_data": "src:fastwork"}],
+            [{"text": "🔙 Back", "callback_data": "menu:back"}],
         ]
     }
+
+
+def build_platform_submenu(source: str) -> dict:
+    """Build sub-menu for a specific platform."""
+    if source == "projects":
+        return {
+            "inline_keyboard": [
+                [{"text": "📋 Browse Projects", "callback_data": "menu:browse"}],
+                [{"text": "🔔 Monitor Settings", "callback_data": "menu:monitor"}],
+                [{"text": "🔄 Refresh Now", "callback_data": "menu:refresh"}],
+                [{"text": "ℹ️ Help", "callback_data": "menu:help"}],
+                [{"text": "🔙 Back to Sources", "callback_data": "src:back"}],
+            ]
+        }
+    elif source == "fastwork":
+        return {
+            "inline_keyboard": [
+                [{"text": "📋 Browse Fastwork Jobs", "callback_data": "fw:browse"}],
+                [{"text": "🔔 Monitor Fastwork", "callback_data": "fw:monitor"}],
+                [{"text": "🔄 Refresh Fastwork", "callback_data": "fw:refresh"}],
+                [{"text": "🔙 Back to Sources", "callback_data": "src:back"}],
+            ]
+        }
 
 
 def build_category_keyboard() -> dict:
@@ -747,8 +776,14 @@ class ProjectsBot:
                 await self._cb_category_list(chat_id, message_id, callback_id)
             elif action == "noop":
                 await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
-            else:
-                await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
+            elif action == "fwcat":
+                tag_id = parts[1]
+                page = int(parts[2])
+                await self._fw_show_page(chat_id, message_id, tag_id, page)
+            elif action == "fw":
+                await self._cb_fastwork(chat_id, message_id, parts[1], callback_id)
+            elif action == "src":
+                await self._cb_source_select(chat_id, message_id, parts[1], callback_id)
         except Exception as e:
             logger.error(f"Callback handler error: {e}")
             await answer_callback(
@@ -761,14 +796,17 @@ class ProjectsBot:
         await send_message(
             TELEGRAM_BOT_TOKEN,
             chat_id,
-            "🤖 <b>Projects.co.id Bot</b>\n\n"
-            "Bot untuk memantau project freelance terbaru dari Projects.co.id\n\n"
+            "🤖 <b>Freelance Monitor Bot</b>\n\n"
+            "Pantau project freelance dari 2 sumber:\n"
+            "🌐 <b>Projects.co.id</b> — Web dev, mobile, data entry, dll\n"
+            "⚡ <b>Fastwork.id</b> — Desain, UX/UI, fotografi, dll\n\n"
             "✨ <b>Fitur:</b>\n"
-            "• 📋 Browse project per kategori\n"
-            "• 🔔 Auto-notifikasi project baru\n"
+            "• 📋 Browse project per kategori (tiap sumber)\n"
+            "• 🔔 Auto-notifikasi project baru (dengan intel)\n"
             "• 📄 Pagination (10 project/halaman)\n"
-            "• ⚙️ Konfigurasi monitoring per kategori\n\n"
-            "Gunakan menu di bawah untuk mulai! 👇",
+            "• ⚙️ Konfigurasi monitoring per kategori\n"
+            "• 🧠 Competitive intel & client reputation\n\n"
+            "Pilih sumber di bawah untuk mulai! 👇",
             reply_markup=build_main_menu_keyboard(),
         )
 
@@ -899,6 +937,161 @@ class ProjectsBot:
 
         await send_message(
             TELEGRAM_BOT_TOKEN, chat_id, "\n".join(lines)
+        )
+
+    # ---- Source Selection (Projects vs Fastwork) ----
+
+    async def _cb_source_select(
+        self, chat_id: str, message_id: int, action: str, callback_id: str
+    ):
+        await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
+        if action == "back":
+            await edit_message(
+                TELEGRAM_BOT_TOKEN,
+                int(chat_id),
+                message_id,
+                "🤖 <b>Freelance Monitor Bot</b>\n\n"
+                "🌐 <b>Projects.co.id</b> — Web dev, mobile, data entry, dll\n"
+                "⚡ <b>Fastwork.id</b> — Desain, UX/UI, fotografi, dll\n\n"
+                "Pilih sumber:",
+                reply_markup=build_main_menu_keyboard(),
+            )
+        elif action in ("projects", "fastwork"):
+            platform = "Projects.co.id" if action == "projects" else "Fastwork.id"
+            await edit_message(
+                TELEGRAM_BOT_TOKEN,
+                int(chat_id),
+                message_id,
+                f"⚡ <b>{platform}</b> — Pilih aksi:",
+                reply_markup=build_platform_submenu(action),
+            )
+
+    # ---- Fastwork Handlers ----
+
+    async def _cb_fastwork(
+        self, chat_id: str, message_id: int, action: str, callback_id: str
+    ):
+        await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
+        if action == "browse":
+            await self._fw_browse(chat_id, message_id, callback_id)
+        elif action == "refresh":
+            await self._fw_refresh(chat_id, message_id, callback_id)
+        elif action == "monitor":
+            await self._fw_monitor(chat_id, message_id, callback_id)
+
+    async def _fw_browse(self, chat_id: str, message_id: int, callback_id: str):
+        """Show Fastwork job categories."""
+        cats = get_fastwork_categories()
+        if not cats:
+            await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="⚠️ Gagal load kategori Fastwork")
+            return
+
+        buttons = []
+        row = []
+        for cat in cats:
+            row.append({
+                "text": cat["name"],
+                "callback_data": f"fwcat:{cat['id']}:1",
+            })
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        buttons.append([{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}])
+
+        cat_text = "\n".join([f"• {c['name']}" for c in cats[:14]])
+        await edit_message(
+            TELEGRAM_BOT_TOKEN,
+            int(chat_id),
+            message_id,
+            f"⚡ <b>Fastwork Categories</b>\n\n{cat_text}\n\nPilih kategori:",
+            reply_markup={"inline_keyboard": buttons},
+        )
+
+    async def _fw_show_page(
+        self, chat_id: str, message_id: int, tag_id: str, page: int
+    ):
+        """Show a page of Fastwork jobs for a given tag."""
+        jobs, meta = scrape_fastwork_jobs(page=page, page_size=10, tag_id=tag_id if tag_id != "all" else None)
+        total = meta.get("total_count", 0)
+        total_pages = meta.get("total_pages", 1)
+
+        if not jobs:
+            await edit_message(
+                TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
+                "⚠️ Tidak ada job ditemukan."
+            )
+            return
+
+        lines = [
+            f"⚡ <b>Fastwork Jobs</b> — Page {page}/{total_pages}\n"
+            f"📊 {total} jobs ditemukan\n",
+        ]
+        for i, job in enumerate(jobs):
+            lines.append(
+                f"<b>#{i+1}</b> {job.title}\n"
+                f"   💰 {job.budget}  •  📂 {job.tag_name}\n"
+                f"   📅 {job.published_date}  •  🔗 <a href='{job.link}'>View →</a>"
+            )
+
+        buttons = []
+        nav_row = []
+        if page > 1:
+            nav_row.append({"text": "⬅️ Prev", "callback_data": f"fwcat:{tag_id}:{page-1}"})
+        nav_row.append({"text": f"📄 {page}/{total_pages}", "callback_data": "noop"})
+        if page < total_pages:
+            nav_row.append({"text": "Next ➡️", "callback_data": f"fwcat:{tag_id}:{page+1}"})
+        buttons.append(nav_row)
+        buttons.append([{"text": "🔙 Back to Categories", "callback_data": "fw:browse"}])
+        buttons.append([{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}])
+
+        await edit_message(
+            TELEGRAM_BOT_TOKEN,
+            int(chat_id),
+            message_id,
+            "\n\n".join(lines),
+            reply_markup={"inline_keyboard": buttons},
+        )
+
+    async def _fw_refresh(self, chat_id: str, message_id: int, callback_id: str):
+        """Show latest Fastwork jobs."""
+        jobs, meta = scrape_fastwork_jobs(page=1, page_size=10)
+        total = meta.get("total_count", 0)
+
+        if not jobs:
+            await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="⚠️ Gagal load Fastwork jobs")
+            return
+
+        lines = [
+            f"⚡ <b>Fastwork Latest Jobs</b>\n"
+            f"🆕 {total} jobs total\n",
+        ]
+        for i, job in enumerate(jobs[:10]):
+            lines.append(
+                f"<b>#{i+1}</b> {job.title}\n"
+                f"   💰 {job.budget}  •  📂 {job.tag_name}\n"
+                f"   📅 {job.published_date}  •  🔗 <a href='{job.link}'>View →</a>"
+            )
+
+        await edit_message(
+            TELEGRAM_BOT_TOKEN,
+            int(chat_id),
+            message_id,
+            "\n\n".join(lines),
+            reply_markup={"inline_keyboard": [[{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}]]},
+        )
+
+    async def _fw_monitor(self, chat_id: str, message_id: int, callback_id: str):
+        """Fastwork monitoring config (placeholder for now)."""
+        await edit_message(
+            TELEGRAM_BOT_TOKEN,
+            int(chat_id),
+            message_id,
+            "🔔 <b>Fastwork Monitor</b>\n\n"
+            "Coming soon! Untuk sekarang gunakan /fw untuk lihat jobs terbaru.\n\n"
+            "Note: Fastwork job scraping sudah berjalan otomatis.",
+            reply_markup={"inline_keyboard": [[{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}]]},
         )
 
     # ---- Callback Handlers ----
