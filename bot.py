@@ -748,25 +748,105 @@ def build_fastwork_monitor_keyboard(fw_monitor: FastworkMonitorConfig) -> dict:
 
 
 # ============================================================
-# Fastwork Notification Formatter
+# Fastwork Message Formatters
 # ============================================================
 
-def format_fastwork_jobs_notification(jobs: list[FastworkJob], category: str = None) -> str:
-    """Format a Fastwork notification message for new jobs."""
-    cat_emoji = "⚡"
+
+def _truncate(text: str, length: int) -> str:
+    """Truncate text to length chars, adding ellipsis if needed."""
+    if not text:
+        return ""
+    return text[:length] + ("..." if len(text) > length else "")
+
+
+def _build_fastwork_detail_keyboard(job: FastworkJob) -> dict:
+    """Build a keyboard with a View button for a Fastwork job."""
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "🔗 View Full Job",
+                    "url": job.link,
+                }
+            ],
+            [
+                {"text": "🔙 Back to Jobs", "callback_data": f"fwcat:{job.tag_id}:1"}
+            ],
+        ]
+    }
+
+
+def format_fastwork_job_card(job: FastworkJob, index: int = 0) -> str:
+    """Format a single Fastwork job as a detailed card (matching Projects.co.id style)."""
+    offers_emoji = "🔥" if job.offers_count > 10 else "👥" if job.offers_count > 0 else "🆕"
+    type_emoji = "💻" if job.type == "freelance" else "⏰" if job.type == "contract" else "🌐"
+
+    # Status badge
+    status_map = {
+        "open": "🟢 Open",
+        "closed": "🔴 Closed",
+        "in_progress": "🟡 In Progress",
+        "completed": "✅ Completed",
+    }
+    status_text = status_map.get(job.status.lower() if job.status else "", f"📊 {job.status}") if job.status else "📊 Unknown"
+
+    card_lines = [
+        f"{'─' * 30}",
+        f"⚡ <b>#{index + 1} {job.title}</b>\n",
+        f"📝 <i>{_truncate(job.description, 300)}</i>\n",
+        f"💰 <b>Budget:</b> {job.budget}\n",
+        f"📂 <b>Category:</b> {job.tag_name}\n",
+        f"🏷️ <b>Type:</b> {type_emoji} {job.type.capitalize() if job.type else '-'}\n",
+        f"📅 <b>Published:</b> {job.published_date}\n",
+        f"📊 <b>Status:</b> {status_text}\n",
+        f"{offers_emoji} <b>Offers:</b> {job.offers_count}\n",
+    ]
+
+    if job.skills:
+        skills_str = ", ".join(job.skills[:8])
+        if len(job.skills) > 8:
+            skills_str += f" +{len(job.skills) - 8} more"
+        card_lines.append(f"🛠️ <b>Skills:</b> {skills_str}\n")
+
+    if job.client_name:
+        card_lines.append(f"👤 <b>Client:</b> {job.client_name}\n")
+
+    return "".join(card_lines)
+
+
+def format_fastwork_jobs_list(
+    jobs: list[FastworkJob], category: str, page: int, total_pages: int
+) -> str:
+    """Format a paginated list of Fastwork jobs (matching Projects.co.id list style)."""
     header = (
-        f"⚡ <b>{len(jobs)} Fastwork Job Baru</b>"
-        f"{f' di {category}' if category else ''}!\n\n"
+        f"⚡ <b>{category}</b> — Page {page}/{total_pages}\n"
+        f"📊 {len(jobs)} jobs ditemukan\n"
     )
 
-    lines = [header]
-    for i, job in enumerate(jobs[:8]):
+    items = []
+    for i, job in enumerate(jobs):
         offers_emoji = "🔥" if job.offers_count > 10 else "👥" if job.offers_count > 0 else "🆕"
-        lines.append(
-            f"<b>#{i+1}</b> {job.title}\n"
-            f"   💰 {job.budget}  •  📂 {job.tag_name}  •  {offers_emoji} {job.offers_count} offers\n"
-            f"   🔗 <a href='{job.link}'>View →</a>"
+        type_emoji = "💻" if job.type == "freelance" else "⏰" if job.type == "contract" else "🌐"
+        budget_short = job.budget or "N/A"
+        items.append(
+            f"<b>#{i + 1}</b> {job.title}\n"
+            f"   💰 {budget_short}  •  {type_emoji} {job.type or '-'}  •  "
+            f"{offers_emoji} {job.offers_count} offers\n"
+            f"   📂 {job.tag_name}  •  📅 {job.published_date}"
         )
+
+    return header + "\n\n".join(items)
+
+
+def format_fastwork_jobs_notification(jobs: list[FastworkJob], category: str = None) -> str:
+    """Format a Fastwork notification message for new jobs (rich card style)."""
+    cat_emoji = "⚡"
+    lines = [
+        f"⚡ <b>{len(jobs)} Fastwork Job Baru</b>"
+        f"{f' di {category}' if category else ''}!\n\n"
+    ]
+    for i, job in enumerate(jobs[:5]):
+        lines.append(format_fastwork_job_card(job, i))
         lines.append("")
 
     return "\n".join(lines)
@@ -774,6 +854,24 @@ def format_fastwork_jobs_notification(jobs: list[FastworkJob], category: str = N
 
 # Project Cache (for pagination callbacks)
 # ============================================================
+
+
+class FastworkJobCache:
+    """Cache Fastwork jobs per tag+page for detail view resolution."""
+
+    def __init__(self):
+        self._cache: dict[str, list[FastworkJob]] = {}
+
+    def store(self, tag_id: str, page: int, jobs: list[FastworkJob]):
+        key = f"{tag_id}:{page}"
+        self._cache[key] = jobs
+
+    def get(self, tag_id: str, page: int) -> list[FastworkJob]:
+        key = f"{tag_id}:{page}"
+        return self._cache.get(key, [])
+
+    def clear(self):
+        self._cache.clear()
 
 
 class ProjectCache:
@@ -808,6 +906,7 @@ class ProjectsBot:
         self.fw_tracker = FastworkSeenTracker(FW_SEEN_FILE)
         self.fw_monitor = FastworkMonitorConfig(FW_MONITOR_FILE)
         self.cache = ProjectCache()
+        self.fw_cache = FastworkJobCache()
         self._running = False
 
     async def handle_update(self, update: dict):
@@ -901,6 +1000,11 @@ class ProjectsBot:
                 tag_id = parts[1]
                 page = int(parts[2])
                 await self._fw_show_page(chat_id, message_id, tag_id, page)
+            elif action == "fwdetail":
+                tag_id = parts[1]
+                page = int(parts[2])
+                job_idx = int(parts[3])
+                await self._fw_show_detail(chat_id, message_id, tag_id, page, job_idx)
             elif action == "fw":
                 await self._cb_fastwork(chat_id, message_id, parts[1], callback_id)
             elif action == "fwmon":
@@ -1161,8 +1265,12 @@ class ProjectsBot:
     async def _fw_show_page(
         self, chat_id: str, message_id: int, tag_id: str, page: int
     ):
-        """Show a page of Fastwork jobs for a given tag (local pagination)."""
-        PER_PAGE = 10
+        """Show a page of Fastwork jobs for a given tag (local pagination).
+
+        Jobs are cached in fw_cache for detail view resolution.
+        Each job gets a 'View' URL button and a 'Detail' callback button.
+        """
+        PER_PAGE = 8
         all_jobs, _ = get_jobs_by_tag(tag_id=tag_id if tag_id != "all" else None, max_pages=10)
         total = len(all_jobs)
         total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
@@ -1178,31 +1286,37 @@ class ProjectsBot:
             )
             return
 
+        # Store in cache for detail resolution
+        self.fw_cache.store(tag_id, page, page_jobs)
+
         cat_name = "All Jobs"
         if tag_id != "all":
             cats = {c["id"]: c["name"] for c in get_fastwork_categories()}
             cat_name = cats.get(tag_id, tag_id)
 
-        lines = [
-            f"⚡ <b>{cat_name}</b> — Page {page}/{total_pages}\n"
-            f"📊 {total} jobs ditemukan\n",
-        ]
-        for i, job in enumerate(page_jobs):
-            offers_emoji = "🔥" if job.offers_count > 10 else "👥" if job.offers_count > 0 else "🆕"
-            lines.append(
-                f"<b>#{start+i+1}</b> {job.title}\n"
-                f"   💰 {job.budget}  •  {offers_emoji} {job.offers_count} offers\n"
-                f"   📅 {job.published_date}  •  🔗 <a href='{job.link}'>View →</a>"
-            )
+        text = format_fastwork_jobs_list(page_jobs, cat_name, page, total_pages)
 
+        # Build per-job View buttons + navigation
         buttons = []
+        # Per-job row: [View URL btn, Detail callback btn]
+        for i, job in enumerate(page_jobs):
+            global_idx = start + i
+            btn_row = [
+                {"text": "🔗 View", "url": job.link},
+                {"text": f"📋 #{global_idx + 1}", "callback_data": f"fwdetail:{tag_id}:{page}:{global_idx}"},
+            ]
+            buttons.append(btn_row)
+
+        # Navigation
         nav_row = []
         if page > 1:
-            nav_row.append({"text": "⬅️ Prev", "callback_data": f"fwcat:{tag_id}:{page-1}"})
+            nav_row.append({"text": "⬅️ Prev", "callback_data": f"fwcat:{tag_id}:{page - 1}"})
         nav_row.append({"text": f"📄 {page}/{total_pages}", "callback_data": "noop"})
         if page < total_pages:
-            nav_row.append({"text": "Next ➡️", "callback_data": f"fwcat:{tag_id}:{page+1}"})
-        buttons.append(nav_row)
+            nav_row.append({"text": "Next ➡️", "callback_data": f"fwcat:{tag_id}:{page + 1}"})
+        if nav_row:
+            buttons.append(nav_row)
+
         buttons.append([{"text": "🔙 Back to Categories", "callback_data": "fw:browse"}])
         buttons.append([{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}])
 
@@ -1210,8 +1324,32 @@ class ProjectsBot:
             TELEGRAM_BOT_TOKEN,
             int(chat_id),
             message_id,
-            "\n\n".join(lines),
+            text,
             reply_markup={"inline_keyboard": buttons},
+        )
+
+    async def _fw_show_detail(
+        self, chat_id: str, message_id: int, tag_id: str, page: int, job_idx: int
+    ):
+        """Show full detail card for a specific Fastwork job."""
+        jobs = self.fw_cache.get(tag_id, page)
+        if not jobs or job_idx < 0 or job_idx >= len(jobs):
+            await edit_message(
+                TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
+                "⚠️ Job tidak ditemukan. Silakan kembali ke daftar."
+            )
+            return
+
+        job = jobs[job_idx]
+        text = format_fastwork_job_card(job, job_idx)
+        keyboard = _build_fastwork_detail_keyboard(job)
+
+        await edit_message(
+            TELEGRAM_BOT_TOKEN,
+            int(chat_id),
+            message_id,
+            text,
+            reply_markup=keyboard,
         )
 
     async def _fw_refresh(self, chat_id: str, message_id: int, callback_id: str):
@@ -1224,24 +1362,37 @@ class ProjectsBot:
             await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="⚠️ Gagal load Fastwork jobs")
             return
 
-        lines = [
+        self.fw_cache.store("all", 1, jobs)
+
+        text = (
             f"⚡ <b>Fastwork Latest Jobs</b>\n"
-            f"🆕 {total}+ jobs total\n",
-        ]
+            f"🆕 {total}+ jobs total\n"
+        )
+        # Compact inline list
         for i, job in enumerate(jobs):
             offers_emoji = "🔥" if job.offers_count > 10 else "👥" if job.offers_count > 0 else "🆕"
-            lines.append(
-                f"<b>#{i+1}</b> {job.title}\n"
-                f"   💰 {job.budget}  •  📂 {job.tag_name}  •  {offers_emoji} {job.offers_count} offers\n"
-                f"   📅 {job.published_date}  •  🔗 <a href='{job.link}'>View →</a>"
+            type_emoji = "💻" if job.type == "freelance" else "⏰" if job.type == "contract" else "🌐"
+            text += (
+                f"\n<b>#{i + 1}</b> {job.title}\n"
+                f"   💰 {job.budget}  •  {type_emoji} {job.type or '-'}  •  "
+                f"{offers_emoji} {job.offers_count} offers\n"
+                f"   📂 {job.tag_name}  •  📅 {job.published_date}"
             )
+
+        buttons = []
+        for i, job in enumerate(jobs):
+            buttons.append([
+                {"text": "🔗 View", "url": job.link},
+                {"text": f"📋 #{i + 1}", "callback_data": f"fwdetail:all:1:{i}"},
+            ])
+        buttons.append([{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}])
 
         await edit_message(
             TELEGRAM_BOT_TOKEN,
             int(chat_id),
             message_id,
-            "\n\n".join(lines),
-            reply_markup={"inline_keyboard": [[{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}]]},
+            text,
+            reply_markup={"inline_keyboard": buttons},
         )
 
     async def _fw_monitor(self, chat_id: str, message_id: int, callback_id: str):
@@ -1780,12 +1931,12 @@ class ProjectsBot:
 
                             for tag_id, jobs in by_tag.items():
                                 cat_name = cats.get(tag_id, "Unknown")
-                                for i, job in enumerate(jobs[:8]):
-                                    msg = format_fastwork_jobs_notification(
-                                        [job], cat_name
-                                    )
+                                for i, job in enumerate(jobs[:5]):
+                                    text = format_fastwork_job_card(job, i)
+                                    keyboard = _build_fastwork_detail_keyboard(job)
                                     await send_message(
-                                        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, msg
+                                        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+                                        text, reply_markup=keyboard,
                                     )
                                     self.fw_tracker.mark_seen(job.job_id)
                                     await asyncio.sleep(0.5)
