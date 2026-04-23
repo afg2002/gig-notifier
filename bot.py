@@ -109,8 +109,242 @@ class MonitorConfig:
             self._save()
             return True
 
+    def is_monitored(self, category_id: str) -> bool:
+        return category_id in self.monitored_categories
+
 
 # ============================================================
+# Competitive Intel: Budget Comparison
+# ============================================================
+
+import re
+
+BUDGET_FILE = os.path.join(DATA_DIR, "category_budget_stats.json")
+
+
+def _parse_budget(budget_str: str) -> float | None:
+    """Extract numeric budget value from string like 'Rp 500.000 - 1.000.000' or 'Rp 500rb'."""
+    if not budget_str or budget_str == "-":
+        return None
+    # Take first number found
+    nums = re.findall(r"[\d']+\.?\d*", budget_str.replace(".", "").replace("'", ""))
+    if not nums:
+        return None
+    try:
+        val = float("".join(nums[:3]))  # take up to 3 digit groups
+        # Handle "500rb" -> 500000
+        if "rb" in budget_str.lower() and val < 10000:
+            val *= 1000
+        return val
+    except ValueError:
+        return None
+
+
+def _load_budget_stats() -> dict:
+    if os.path.exists(BUDGET_FILE):
+        with open(BUDGET_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def _save_budget_stats(stats: dict):
+    with open(BUDGET_FILE, "w") as f:
+        json.dump(stats, f, indent=2)
+
+
+def update_budget_stats(project: Project):
+    """Update rolling budget stats when new project is scraped."""
+    if not project.budget or project.budget == "-":
+        return
+    stats = _load_budget_stats()
+    cat_id = "general"
+    budget_val = _parse_budget(project.budget)
+    if not budget_val:
+        return
+
+    if cat_id not in stats:
+        stats[cat_id] = {"values": [], "count": 0}
+    stats[cat_id]["values"].append(budget_val)
+    stats[cat_id]["count"] += 1
+    # Keep rolling window of last 100 values
+    if len(stats[cat_id]["values"]) > 100:
+        stats[cat_id]["values"] = stats[cat_id]["values"][-100:]
+    _save_budget_stats(stats)
+
+
+def get_budget_comparison(budget_str: str) -> str:
+    """Return emoji + text comparing budget to rolling category average."""
+    val = _parse_budget(budget_str)
+    if not val:
+        return ""
+    stats = _load_budget_stats()
+    general = stats.get("general", {"values": []})
+    if not general["values"]:
+        return ""
+    avg = sum(general["values"]) / len(general["values"])
+    ratio = val / avg if avg > 0 else 1.0
+    if ratio >= 1.5:
+        return f"💎 <b>Above avg {ratio:.1f}x!</b>"
+    elif ratio >= 1.2:
+        return f"✅ Above avg ({ratio:.1f}x)"
+    elif ratio >= 0.8:
+        return f"📊 ~avg"
+    else:
+        return f"⚠️ Below avg ({ratio:.1f}x)"
+
+
+# ============================================================
+# Client Reputation Tracker
+# ============================================================
+
+CLIENT_FILE = os.path.join(DATA_DIR, "client_stats.json")
+
+
+def _load_client_stats() -> dict:
+    if os.path.exists(CLIENT_FILE):
+        with open(CLIENT_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def _save_client_stats(stats: dict):
+    with open(CLIENT_FILE, "w") as f:
+        json.dump(stats, f, indent=2)
+
+
+def update_client_stats(project: Project):
+    """Record project from a client owner."""
+    if not project.owner_name or project.owner_name == "Unknown":
+        return
+    stats = _load_client_stats()
+    key = project.owner_name
+    if key not in stats:
+        stats[key] = {
+            "project_count": 0,
+            "total_budget": 0.0,
+            "projects": [],
+            "first_seen": project.published_date or "",
+            "last_seen": "",
+        }
+    stats[key]["project_count"] += 1
+    bval = _parse_budget(project.budget) or 0
+    if bval > 0:
+        stats[key]["total_budget"] += bval
+    stats[key]["last_seen"] = project.published_date or ""
+    # Keep last 20 projects per client
+    stats[key]["projects"].append({
+        "id": project.project_id,
+        "title": project.title[:60],
+        "budget": project.budget,
+        "date": project.published_date or "",
+    })
+    if len(stats[key]["projects"]) > 20:
+        stats[key]["projects"] = stats[key]["projects"][-20:]
+    _save_client_stats(stats)
+
+
+def get_client_reputation(owner_name: str) -> str:
+    """Return emoji + short reputation line for client."""
+    if not owner_name or owner_name == "Unknown":
+        return "❓ New client"
+    stats = _load_client_stats()
+    client = stats.get(owner_name)
+    if not client:
+        return "❓ New client"
+    count = client["project_count"]
+    avg_budget = (client["total_budget"] / count) if count > 0 and client["total_budget"] > 0 else 0
+    if count >= 10:
+        return f"🏆 Veteran ({count} projects, avg {avg_budget:,.0f})"
+    elif count >= 5:
+        return f"⭐ Regular ({count} projects)"
+    else:
+        return f"👤 Known ({count} project{'s' if count > 1 else ''})"
+
+
+# ============================================================
+# Daily Digest Tracker
+# ============================================================
+
+DIGEST_FILE = os.path.join(DATA_DIR, "daily_digest.json")
+
+
+def _load_digest() -> dict:
+    if os.path.exists(DIGEST_FILE):
+        with open(DIGEST_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def _save_digest(digest: dict):
+    with open(DIGEST_FILE, "w") as f:
+        json.dump(digest, f, indent=2)
+
+
+def _today_key() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def record_digest_project(project: Project, category_name: str):
+    """Record a newly notified project in today's digest."""
+    digest = _load_digest()
+    today = _today_key()
+    if today not in digest:
+        digest[today] = {"projects": [], "sent": False}
+    # Avoid duplicates
+    existing = {p["id"] for p in digest[today]["projects"]}
+    if project.project_id not in existing:
+        budget_val = _parse_budget(project.budget) or 0
+        digest[today]["projects"].append({
+            "id": project.project_id,
+            "title": project.title[:80],
+            "description": project.description[:200],
+            "budget": project.budget,
+            "budget_val": budget_val,
+            "category": category_name,
+            "bid_count": project.bid_count or "0",
+            "owner": project.owner_name,
+            "link": project.link,
+            "published": project.published_date or "",
+        })
+    _save_digest(digest)
+
+
+def get_daily_digest_text() -> str:
+    """Build formatted digest message for today."""
+    digest = _load_digest()
+    today = _today_key()
+    today_data = digest.get(today, {"projects": []})
+    projects = today_data.get("projects", [])
+
+    if not projects:
+        return None
+
+    # Group by category
+    by_cat: dict[str, list] = {}
+    for p in projects:
+        cat = p["category"]
+        if cat not in by_cat:
+            by_cat[cat] = []
+        by_cat[cat].append(p)
+
+    lines = [
+        f"📊 <b>Daily Digest</b> — {today}\n",
+        f"🆕 {len(projects)} project baru hari ini\n",
+    ]
+
+    for cat, projs in by_cat.items():
+        lines.append(f"\n{cat}:")
+        for p in projs[:5]:
+            bids = int(p["bid_count"]) if p["bid_count"].isdigit() else 0
+            bid_emoji = "🔥" if bids > 20 else "👥" if bids > 5 else "🆕"
+            budget_cmp = get_budget_comparison(p["budget"])
+            cmp_txt = f" {budget_cmp}" if budget_cmp else ""
+            lines.append(
+                f"  ▸ {p['title']}\n"
+                f"    💰 {p['budget']}{cmp_txt}  •  {bid_emoji} {p['bid_count']} bids"
+            )
+
+    return "\n".join(lines)
 # Telegram API Helpers
 # ============================================================
 
@@ -458,6 +692,10 @@ class ProjectsBot:
             await self._cmd_help(chat_id)
         elif text == "/status":
             await self._cmd_status(chat_id)
+        elif text == "/digest":
+            await self._cmd_digest(chat_id)
+        elif text == "/topclients":
+            await self._cmd_top_clients(chat_id)
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
@@ -614,6 +852,45 @@ class ProjectsBot:
             chat_id,
             format_monitor_status(self.monitor),
             reply_markup=build_main_menu_keyboard(),
+        )
+
+    async def _cmd_digest(self, chat_id: str):
+        """Send today's daily digest manually."""
+        text = get_daily_digest_text()
+        if text:
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, text)
+        else:
+            await send_message(
+                TELEGRAM_BOT_TOKEN,
+                chat_id,
+                "📭 Belum ada project baru hari ini. Check lagi nanti!",
+            )
+
+    async def _cmd_top_clients(self, chat_id: str):
+        """Show top clients by project count."""
+        stats = _load_client_stats()
+        if not stats:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id, "📭 Belum ada data client. Belum ada yang dimonitor."
+            )
+            return
+
+        # Sort by project count desc
+        sorted_clients = sorted(
+            stats.items(), key=lambda x: x[1]["project_count"], reverse=True
+        )[:10]
+
+        lines = ["🏆 <b>Top Clients</b> (by project count)\n"]
+        for name, data in sorted_clients:
+            count = data["project_count"]
+            avg = data["total_budget"] / count if count > 0 and data["total_budget"] > 0 else 0
+            lines.append(
+                f"• <b>{name}</b>\n"
+                f"  {count} projects  •  avg budget Rp {avg:,.0f}"
+            )
+
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id, "\n".join(lines)
         )
 
     # ---- Callback Handlers ----
@@ -1062,6 +1339,11 @@ class ProjectsBot:
                         )
 
                         for i, p in enumerate(new_projects[:5]):
+                            # Update stats for competitive intel & client reputation
+                            update_budget_stats(p)
+                            update_client_stats(p)
+                            record_digest_project(p, category["name"])
+
                             bid_count = (
                                 int(p.bid_count)
                                 if p.bid_count and p.bid_count.isdigit()
@@ -1074,13 +1356,20 @@ class ProjectsBot:
                                 if bid_count > 5
                                 else "🆕"
                             )
+                            budget_cmp = get_budget_comparison(p.budget)
+                            client_rep = get_client_reputation(p.owner_name)
 
+                            # Truncate description to ~150 chars for Telegram
+                            desc_short = (p.description[:150] + "...") if len(p.description) > 150 else p.description
+                            cmp_txt = f"\n   {budget_cmp}" if budget_cmp else ""
                             msg = (
                                 f"<b>▸ {p.title}</b>\n"
-                                f"   💰 {p.budget or '-'}  •  "
-                                f"{bid_emoji} {p.bid_count or '0'} bids  •  "
-                                f"📅 {p.published_date or '-'}\n"
-                                f"   🔗 <a href='{p.link}'>View →</a>\n"
+                                f"   📝 {desc_short}\n\n"
+                                f"   💰 {p.budget or '-'}{cmp_txt}\n"
+                                f"   {bid_emoji} {p.bid_count or '0'} bids  •  "
+                                f"👤 {p.owner_name} — {client_rep}\n"
+                                f"   📅 {p.published_date or '-'}  •  "
+                                f"🔗 <a href='{p.link}'>View →</a>\n"
                             )
                             await send_message(
                                 TELEGRAM_BOT_TOKEN,
