@@ -27,7 +27,8 @@ from scraper import (
 from fastwork_scraper import (
     scrape_jobs as scrape_fastwork_jobs,
     get_categories as get_fastwork_categories,
-    scrape_all_pages as scrape_fastwork_all_pages,
+    scrape_new_jobs,
+    get_jobs_by_tag,
     FastworkJob,
 )
 
@@ -45,6 +46,8 @@ PROJECTS_PER_PAGE = int(os.getenv("PROJECTS_PER_PAGE", "10"))
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 SEEN_FILE = os.path.join(DATA_DIR, "seen_projects.json")
 MONITOR_FILE = os.path.join(DATA_DIR, "monitor_config.json")
+FW_SEEN_FILE = os.path.join(DATA_DIR, "fastwork_seen.json")
+FW_MONITOR_FILE = os.path.join(DATA_DIR, "fastwork_monitor.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -80,6 +83,72 @@ class SeenTracker:
 
     def mark_seen(self, project_id: str):
         self.seen_ids.add(project_id)
+        self._save()
+
+
+class FastworkSeenTracker:
+    """Persistently tracks which Fastwork job IDs have been notified."""
+
+    def __init__(self, data_file: str):
+        self.data_file = data_file
+        self.seen_ids: set[str] = set()
+        self._load()
+
+    def _load(self):
+        if os.path.exists(self.data_file):
+            with open(self.data_file, "r") as f:
+                self.seen_ids = set(json.load(f))
+            logger.info(f"Loaded {len(self.seen_ids)} seen Fastwork job IDs")
+
+    def _save(self):
+        with open(self.data_file, "w") as f:
+            json.dump(list(self.seen_ids), f, indent=2)
+
+    def is_seen(self, job_id: str) -> bool:
+        return job_id in self.seen_ids
+
+    def mark_seen(self, job_id: str):
+        self.seen_ids.add(job_id)
+        self._save()
+
+
+class FastworkMonitorConfig:
+    """Manages per-category Fastwork monitoring configuration."""
+
+    def __init__(self, data_file: str):
+        self.data_file = data_file
+        self.monitored_tags: set[str] = set()  # tag IDs
+        self._load()
+
+    def _load(self):
+        if os.path.exists(self.data_file):
+            with open(self.data_file, "r") as f:
+                data = json.load(f)
+                self.monitored_tags = set(data.get("monitored_tags", []))
+            logger.info(f"Loaded Fastwork monitor config: {len(self.monitored_tags)} tags")
+        else:
+            # Default: monitor all popular categories
+            self.monitored_tags = {
+                "3327d5e5-7b28-45c8-b552-9da38b3d585d",  # Pengembangan Aplikasi
+                "eb7276d1-1b83-454e-83e6-c1ee68f80c0a",  # Pengembangan Website
+                "a880a9d4-fe0c-4fad-908c-ca4050c5ebea",  # Pemasaran
+                "81f7bcc2-1694-400c-87ec-055243de0e48",  # Bisnis & Keuangan
+                "28956f70-de0f-4333-8da6-f8307489c5b5",  # Desain Grafis
+            }
+            self._save()
+
+    def _save(self):
+        with open(self.data_file, "w") as f:
+            json.dump({"monitored_tags": list(self.monitored_tags)}, f, indent=2)
+
+    def is_monitored(self, tag_id: str) -> bool:
+        return tag_id in self.monitored_tags
+
+    def toggle(self, tag_id: str):
+        if tag_id in self.monitored_tags:
+            self.monitored_tags.discard(tag_id)
+        else:
+            self.monitored_tags.add(tag_id)
         self._save()
 
 
@@ -655,7 +724,54 @@ def build_monitor_keyboard(monitor: MonitorConfig) -> dict:
     return {"inline_keyboard": buttons}
 
 
+def build_fastwork_monitor_keyboard(fw_monitor: FastworkMonitorConfig) -> dict:
+    """Build Fastwork monitoring toggle keyboard."""
+    cats = get_fastwork_categories()
+    buttons = []
+    row = []
+    for cat in cats:
+        is_on = fw_monitor.is_monitored(cat["id"])
+        status = "✅" if is_on else "⬜"
+        row.append({
+            "text": f"{status} {cat['name']}",
+            "callback_data": f"fwmon:{cat['id']}",
+        })
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    buttons.append([{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}])
+
+    return {"inline_keyboard": buttons}
+
+
 # ============================================================
+# Fastwork Notification Formatter
+# ============================================================
+
+def format_fastwork_jobs_notification(jobs: list[FastworkJob], category: str = None) -> str:
+    """Format a Fastwork notification message for new jobs."""
+    cat_emoji = "⚡"
+    header = (
+        f"⚡ <b>{len(jobs)} Fastwork Job Baru</b>"
+        f"{f' di {category}' if category else ''}!\n\n"
+    )
+
+    lines = [header]
+    for i, job in enumerate(jobs[:8]):
+        offers_emoji = "🔥" if job.offers_count > 10 else "👥" if job.offers_count > 0 else "🆕"
+        lines.append(
+            f"<b>#{i+1}</b> {job.title}\n"
+            f"   💰 {job.budget}  •  📂 {job.tag_name}  •  {offers_emoji} {job.offers_count} offers\n"
+            f"   🔗 <a href='{job.link}'>View →</a>"
+        )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # Project Cache (for pagination callbacks)
 # ============================================================
 
@@ -689,6 +805,8 @@ class ProjectsBot:
     def __init__(self):
         self.tracker = SeenTracker(SEEN_FILE)
         self.monitor = MonitorConfig(MONITOR_FILE)
+        self.fw_tracker = FastworkSeenTracker(FW_SEEN_FILE)
+        self.fw_monitor = FastworkMonitorConfig(FW_MONITOR_FILE)
         self.cache = ProjectCache()
         self._running = False
 
@@ -725,6 +843,8 @@ class ProjectsBot:
             await self._cmd_digest(chat_id)
         elif text == "/topclients":
             await self._cmd_top_clients(chat_id)
+        elif text in ("/fw", "/fastwork"):
+            await self._cmd_fastwork(chat_id)
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
@@ -737,6 +857,7 @@ class ProjectsBot:
                 "/status — Status monitoring\n"
                 "/digest — Ringkasan project hari ini\n"
                 "/topclients — Top 10 client terbanyak\n"
+                "/fw — Browse Fastwork jobs\n"
                 "/help — Bantuan",
                 reply_markup=build_main_menu_keyboard(),
             )
@@ -782,6 +903,10 @@ class ProjectsBot:
                 await self._fw_show_page(chat_id, message_id, tag_id, page)
             elif action == "fw":
                 await self._cb_fastwork(chat_id, message_id, parts[1], callback_id)
+            elif action == "fwmon":
+                tag_id = parts[1]
+                self.fw_monitor.toggle(tag_id)
+                await self._fw_monitor(chat_id, message_id, callback_id)
             elif action == "src":
                 await self._cb_source_select(chat_id, message_id, parts[1], callback_id)
         except Exception as e:
@@ -900,6 +1025,30 @@ class ProjectsBot:
             reply_markup=build_main_menu_keyboard(),
         )
 
+    async def _cmd_fastwork(self, chat_id: str):
+        """Handle /fw command — browse Fastwork jobs."""
+        cats = get_fastwork_categories()
+        buttons = []
+        row = []
+        for cat in cats:
+            row.append({
+                "text": cat["name"],
+                "callback_data": f"fwcat:{cat['id']}:1",
+            })
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        buttons.append([{"text": "🔙 Back to Sources", "callback_data": "src:back"}])
+
+        cat_text = "\n".join([f"• {c['name']}" for c in cats[:14]])
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            f"⚡ <b>Fastwork Categories</b>\n\n{cat_text}\n\nPilih kategori:",
+            reply_markup={"inline_keyboard": buttons},
+        )
+
     async def _cmd_digest(self, chat_id: str):
         """Send today's daily digest manually."""
         text = get_daily_digest_text()
@@ -1012,26 +1161,37 @@ class ProjectsBot:
     async def _fw_show_page(
         self, chat_id: str, message_id: int, tag_id: str, page: int
     ):
-        """Show a page of Fastwork jobs for a given tag."""
-        jobs, meta = scrape_fastwork_jobs(page=page, page_size=10, tag_id=tag_id if tag_id != "all" else None)
-        total = meta.get("total_count", 0)
-        total_pages = meta.get("total_pages", 1)
+        """Show a page of Fastwork jobs for a given tag (local pagination)."""
+        PER_PAGE = 10
+        all_jobs, _ = get_jobs_by_tag(tag_id=tag_id if tag_id != "all" else None, max_pages=10)
+        total = len(all_jobs)
+        total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+        page = min(page, total_pages)
+        start = (page - 1) * PER_PAGE
+        end = start + PER_PAGE
+        page_jobs = all_jobs[start:end]
 
-        if not jobs:
+        if not page_jobs:
             await edit_message(
                 TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
-                "⚠️ Tidak ada job ditemukan."
+                "⚠️ Tidak ada job ditemukan di kategori ini."
             )
             return
 
+        cat_name = "All Jobs"
+        if tag_id != "all":
+            cats = {c["id"]: c["name"] for c in get_fastwork_categories()}
+            cat_name = cats.get(tag_id, tag_id)
+
         lines = [
-            f"⚡ <b>Fastwork Jobs</b> — Page {page}/{total_pages}\n"
+            f"⚡ <b>{cat_name}</b> — Page {page}/{total_pages}\n"
             f"📊 {total} jobs ditemukan\n",
         ]
-        for i, job in enumerate(jobs):
+        for i, job in enumerate(page_jobs):
+            offers_emoji = "🔥" if job.offers_count > 10 else "👥" if job.offers_count > 0 else "🆕"
             lines.append(
-                f"<b>#{i+1}</b> {job.title}\n"
-                f"   💰 {job.budget}  •  📂 {job.tag_name}\n"
+                f"<b>#{start+i+1}</b> {job.title}\n"
+                f"   💰 {job.budget}  •  {offers_emoji} {job.offers_count} offers\n"
                 f"   📅 {job.published_date}  •  🔗 <a href='{job.link}'>View →</a>"
             )
 
@@ -1056,8 +1216,9 @@ class ProjectsBot:
 
     async def _fw_refresh(self, chat_id: str, message_id: int, callback_id: str):
         """Show latest Fastwork jobs."""
-        jobs, meta = scrape_fastwork_jobs(page=1, page_size=10)
-        total = meta.get("total_count", 0)
+        all_jobs, _ = get_jobs_by_tag(max_pages=3)
+        jobs = all_jobs[:10]
+        total = len(all_jobs)
 
         if not jobs:
             await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="⚠️ Gagal load Fastwork jobs")
@@ -1065,12 +1226,13 @@ class ProjectsBot:
 
         lines = [
             f"⚡ <b>Fastwork Latest Jobs</b>\n"
-            f"🆕 {total} jobs total\n",
+            f"🆕 {total}+ jobs total\n",
         ]
-        for i, job in enumerate(jobs[:10]):
+        for i, job in enumerate(jobs):
+            offers_emoji = "🔥" if job.offers_count > 10 else "👥" if job.offers_count > 0 else "🆕"
             lines.append(
                 f"<b>#{i+1}</b> {job.title}\n"
-                f"   💰 {job.budget}  •  📂 {job.tag_name}\n"
+                f"   💰 {job.budget}  •  📂 {job.tag_name}  •  {offers_emoji} {job.offers_count} offers\n"
                 f"   📅 {job.published_date}  •  🔗 <a href='{job.link}'>View →</a>"
             )
 
@@ -1083,15 +1245,15 @@ class ProjectsBot:
         )
 
     async def _fw_monitor(self, chat_id: str, message_id: int, callback_id: str):
-        """Fastwork monitoring config (placeholder for now)."""
+        """Show Fastwork monitoring settings."""
         await edit_message(
             TELEGRAM_BOT_TOKEN,
             int(chat_id),
             message_id,
-            "🔔 <b>Fastwork Monitor</b>\n\n"
-            "Coming soon! Untuk sekarang gunakan /fw untuk lihat jobs terbaru.\n\n"
-            "Note: Fastwork job scraping sudah berjalan otomatis.",
-            reply_markup={"inline_keyboard": [[{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}]]},
+            "🔔 <b>Fastwork Monitor Settings</b>\n\n"
+            "Pilih kategori untuk toggle monitoring:\n"
+            "(Enabled = dapat notifikasi project baru)",
+            reply_markup=build_fastwork_monitor_keyboard(self.fw_monitor),
         )
 
     # ---- Callback Handlers ----
@@ -1490,15 +1652,20 @@ class ProjectsBot:
         ]
         cat_list = "\n".join(f"  {c['emoji']} {c['name']}" for c in monitored)
 
+        fw_cats = {c["id"]: c["name"] for c in get_fastwork_categories()}
+        fw_monitored = [fw_cats.get(t, t) for t in self.fw_monitor.monitored_tags]
+        fw_list = "\n".join(f"  ⚡ {n}" for n in fw_monitored)
+
         await send_message(
             TELEGRAM_BOT_TOKEN,
             TELEGRAM_CHAT_ID,
-            "🤖 <b>Projects.co.id Bot Active!</b>\n\n"
-            f"⏱️ Polling: setiap <b>{POLL_INTERVAL_SECONDS}s</b>\n"
-            f"📄 Projects/page: <b>{PROJECTS_PER_PAGE}</b>\n"
-            f"🔔 Monitoring <b>{len(monitored)}</b> kategori:\n\n"
-            f"{cat_list or '  ⬜ Belum ada kategori yang dimonitor'}\n\n"
-            "Gunakan /monitor untuk mengubah konfigurasi.",
+            "🤖 <b>Freelance Monitor Bot Active!</b>\n\n"
+            "🌐 <b>Projects.co.id</b>\n"
+            f"🔔 Monitoring <b>{len(monitored)}</b> kategori\n\n"
+            "⚡ <b>Fastwork.id</b>\n"
+            f"🔔 Monitoring <b>{len(fw_monitored)}</b> kategori\n\n"
+            f"{fw_list or '  ⬜ Belum ada yang dimonitor'}\n\n"
+            "Polling setiap <b>{POLL_INTERVAL_SECONDS}s</b>",
             reply_markup=build_main_menu_keyboard(),
         )
 
@@ -1589,6 +1756,48 @@ class ProjectsBot:
                             )
 
                     await asyncio.sleep(2)  # Delay between categories
+
+                # ---- Fastwork Polling ----
+                if self.fw_monitor.monitored_tags:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            new_jobs = await loop.run_in_executor(
+                                executor, scrape_new_jobs, None, self.fw_tracker.seen_ids
+                            )
+
+                        if new_jobs:
+                            logger.info(f"⚡ {len(new_jobs)} new Fastwork jobs")
+
+                            # Group by tag for notification
+                            by_tag: dict[str, list[FastworkJob]] = {}
+                            for job in new_jobs:
+                                if job.tag_id not in by_tag:
+                                    by_tag[job.tag_id] = []
+                                by_tag[job.tag_id].append(job)
+
+                            cats = {c["id"]: c["name"] for c in get_fastwork_categories()}
+
+                            for tag_id, jobs in by_tag.items():
+                                cat_name = cats.get(tag_id, "Unknown")
+                                for i, job in enumerate(jobs[:8]):
+                                    msg = format_fastwork_jobs_notification(
+                                        [job], cat_name
+                                    )
+                                    await send_message(
+                                        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, msg
+                                    )
+                                    self.fw_tracker.mark_seen(job.job_id)
+                                    await asyncio.sleep(0.5)
+
+                            if len(new_jobs) > 8:
+                                await send_message(
+                                    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+                                    f"...dan <b>{len(new_jobs) - 8}</b> job Fastwork lainnya. "
+                                    f"Gunakan /fw untuk lihat semua."
+                                )
+                    except Exception as e:
+                        logger.error(f"Fastwork polling error: {e}")
 
             except Exception as e:
                 logger.error(f"Polling error: {e}")

@@ -1,12 +1,14 @@
 """
 Fastwork Jobboard scraper using jobboard-api.fastwork.id
+Note: API does NOT support server-side tag_id filtering.
+      All filtering is done client-side by fetching all pages.
 """
 
 import os
 import re
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -36,11 +38,8 @@ class FastworkJob:
     published_date: str
     link: str
     client_name: Optional[str] = None
-    skills: list = None
-
-    def __post_init__(self):
-        if self.skills is None:
-            self.skills = []
+    skills: list = field(default_factory=list)
+    offers_count: int = 0
 
 
 def _clean_text(text: str) -> str:
@@ -75,6 +74,58 @@ def _api_request(url: str, params: dict = None) -> dict:
         return {"errors": {"detail": str(e)}}
 
 
+def _raw_job_to_fastwork_job(item: dict) -> FastworkJob:
+    """Convert raw API item to FastworkJob."""
+    tag = item.get("tag") or {}
+    tag_name = tag.get("name", "Unknown") if isinstance(tag, dict) else "Unknown"
+    tag_id = tag.get("id", "") if isinstance(tag, dict) else ""
+
+    # Description
+    raw_desc = _clean_text(item.get("description") or "")
+    description = raw_desc[:500] + ("..." if len(raw_desc) > 500 else "")
+
+    # Budget (API returns integer like 600000 = Rp 600,000)
+    budget_raw = item.get("budget")
+    if budget_raw:
+        try:
+            budget_val = int(budget_raw)
+            budget_str = f"Rp {budget_val:,.0f}"
+        except (ValueError, TypeError):
+            budget_str = str(budget_raw)
+    else:
+        budget_str = "-"
+
+    # Published date
+    pub = item.get("published_at") or item.get("inserted_at") or ""
+    if pub:
+        try:
+            dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
+            published = dt.strftime("%d %b %Y")
+        except Exception:
+            published = pub[:10]
+    else:
+        published = "-"
+
+    # Offers count
+    offers = item.get("freelance_offers_count", 0) or 0
+
+    return FastworkJob(
+        job_id=item.get("id", ""),
+        title=_clean_text(item.get("title", "")),
+        description=description,
+        budget=budget_str,
+        tag_name=tag_name,
+        tag_id=tag_id,
+        status=item.get("status", ""),
+        type=item.get("type", "freelance"),
+        published_date=published,
+        link=f"https://jobboard.fastwork.id/jobs/{item.get('id', '')}",
+        client_name=item.get("user_profile", {}).get("display_name") if isinstance(item.get("user_profile"), dict) else None,
+        skills=item.get("skills") or [],
+        offers_count=offers,
+    )
+
+
 def get_categories() -> list[dict]:
     """Get available job categories/tags from API."""
     data = _api_request(f"{BASE_URL}/api/tags", {"page_size": 100})
@@ -88,93 +139,106 @@ def get_categories() -> list[dict]:
     return sorted(cats, key=lambda x: x["sort"])
 
 
+def scrape_all_raw(page: int = 1, page_size: int = 20) -> tuple[list[dict], dict]:
+    """Fetch raw API page without any tag filtering."""
+    result = _api_request(API_JOBS, {"page": page, "page_size": page_size})
+    if "errors" in result:
+        logger.error(f"API error: {result['errors']}")
+        return [], {}
+    data = result.get("data", [])
+    meta = result.get("meta", {})
+    return data, meta
+
+
 def scrape_jobs(
     page: int = 1,
     page_size: int = 20,
     tag_id: str = None,
-    status: str = "open",
 ) -> tuple[list[FastworkJob], dict]:
-    """Scrape jobs from Fastwork API. Returns (jobs, meta)."""
-    params = {
-        "page": page,
-        "page_size": page_size,
-    }
+    """
+    Fetch page of jobs from API.
+    NOTE: tag_id filtering is done CLIENT-SIDE since API doesn't support it.
+    For category-specific jobs, use get_jobs_by_tag() instead.
+    """
+    data, meta = scrape_all_raw(page=page, page_size=page_size)
+
+    jobs = [_raw_job_to_fastwork_job(item) for item in data]
+
+    # Client-side tag filtering (API doesn't support server-side tag_id)
     if tag_id:
-        params["tag_id"] = tag_id
-    if status:
-        params["status"] = status
+        jobs = [j for j in jobs if j.tag_id == tag_id]
 
-    result = _api_request(API_JOBS, params)
-
-    if "errors" in result:
-        logger.error(f"API error: {result['errors']}")
-        return [], {}
-
-    jobs = []
-    for item in result.get("data", []):
-        tag = item.get("tag", {}) or {}
-        tag_name = tag.get("name", "Unknown")
-        tag_id = tag.get("id", "")
-
-        # Build description (truncate for display)
-        raw_desc = _clean_text(item.get("description") or "")
-        description = raw_desc[:500] + ("..." if len(raw_desc) > 500 else "")
-
-        # Budget
-        budget_raw = item.get("budget")
-        if budget_raw:
-            try:
-                budget_val = int(budget_raw)
-                budget_str = f"Rp {budget_val:,.0f}"
-            except (ValueError, TypeError):
-                budget_str = str(budget_raw)
-        else:
-            budget_str = "-"
-
-        # Published date
-        pub = item.get("published_at") or item.get("inserted_at") or ""
-        if pub:
-            try:
-                dt = datetime.fromisoformat(pub.replace("Z", "+00:00"))
-                published = dt.strftime("%d %b %Y")
-            except Exception:
-                published = pub[:10]
-        else:
-            published = "-"
-
-        job = FastworkJob(
-            job_id=item.get("id", ""),
-            title=_clean_text(item.get("title", "")),
-            description=description,
-            budget=budget_str,
-            tag_name=tag_name,
-            tag_id=tag_id,
-            status=item.get("status", ""),
-            type=item.get("type", "freelance"),
-            published_date=published,
-            link=f"https://jobboard.fastwork.id/jobs/{item.get('id', '')}",
-            client_name=None,
-            skills=item.get("skills") or [],
-        )
-        jobs.append(job)
-
-    meta = result.get("meta", {})
     return jobs, meta
 
 
-def scrape_all_pages(tag_id: str = None, max_pages: int = 3, progress_callback=None) -> list[FastworkJob]:
-    """Scrape multiple pages of jobs."""
-    all_jobs = []
+def get_jobs_by_tag(tag_id: str = None, max_pages: int = 10) -> tuple[list[FastworkJob], int]:
+    """
+    Get jobs filtered by tag_id, fetching multiple pages until we have enough.
+    Returns (jobs, total_count).
+    total_count is estimated from the first page's tag distribution.
+    """
+    all_tag_jobs = []
+    total_count = 0
+
     for page in range(1, max_pages + 1):
-        jobs, meta = scrape_jobs(page=page, page_size=20, tag_id=tag_id)
-        if not jobs:
+        data, meta = scrape_all_raw(page=page, page_size=20)
+        if not data:
             break
-        all_jobs.extend(jobs)
-        if progress_callback:
-            progress_callback(page, max_pages, len(all_jobs))
+
+        if page == 1:
+            # Count total for this tag from first page results
+            all_jobs_page1 = [_raw_job_to_fastwork_job(item) for item in data]
+            if tag_id:
+                all_tag_jobs = [j for j in all_jobs_page1 if j.tag_id == tag_id]
+                # Estimate total: count this tag in all available pages
+                # Since we don't know total, use a heuristic
+                total_count = len(all_tag_jobs)  # Will be refined
+            else:
+                all_tag_jobs = all_jobs_page1
+                total_count = meta.get("total_count", 0)
+        else:
+            page_jobs = [_raw_job_to_fastwork_job(item) for item in data]
+            if tag_id:
+                page_jobs = [j for j in page_jobs if j.tag_id == tag_id]
+            all_tag_jobs.extend(page_jobs)
+
         if meta.get("total_pages", 1) <= page:
             break
-    return all_jobs
+
+    # Get accurate total count for this tag by counting across first 3 pages
+    if tag_id and total_count == 0:
+        # Estimate from first page
+        count = sum(1 for _ in all_tag_jobs)
+        total_count = count * 5  # rough estimate
+
+    return all_tag_jobs, total_count
+
+
+def scrape_new_jobs(tag_id: str = None, seen_ids: set = None) -> list[FastworkJob]:
+    """
+    Scrape latest jobs for monitoring. Returns only truly NEW jobs not in seen_ids.
+    Used by the polling monitor.
+    """
+    if seen_ids is None:
+        seen_ids = set()
+
+    new_jobs = []
+    for page in range(1, 4):  # Check first 3 pages for new jobs
+        data, meta = scrape_all_raw(page=page, page_size=20)
+        if not data:
+            break
+
+        for item in data:
+            job = _raw_job_to_fastwork_job(item)
+            if tag_id and job.tag_id != tag_id:
+                continue
+            if job.job_id not in seen_ids:
+                new_jobs.append(job)
+
+        if meta.get("total_pages", 1) <= page:
+            break
+
+    return new_jobs
 
 
 if __name__ == "__main__":
