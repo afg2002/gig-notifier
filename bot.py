@@ -706,6 +706,8 @@ class ProjectsBot:
                 "/monitor — Atur monitoring kategori\n"
                 "/refresh — Refresh project terbaru\n"
                 "/status — Status monitoring\n"
+                "/digest — Ringkasan project hari ini\n"
+                "/topclients — Top 10 client terbanyak\n"
                 "/help — Bantuan",
                 reply_markup=build_main_menu_keyboard(),
             )
@@ -835,11 +837,17 @@ class ProjectsBot:
             "/monitor — Atur monitoring kategori\n"
             "/refresh — Refresh & cek project baru\n"
             "/status — Status monitoring saat ini\n"
+            "/digest — Ringkasan project hari ini\n"
+            "/topclients — Top 10 client terbanyak\n"
             "/help — Bantuan ini\n\n"
+            "<b>Fitur Cerdas:</b>\n"
+            "🧠 Competitive Intel — bandingkan budget dengan rata-rata kategori\n"
+            "👤 Client Reputation — info client sebelumnya (Veteran/Regular/Known)\n"
+            "📊 Daily Digest — ringkasan harian project baru\n\n"
             "<b>Cara Pakai:</b>\n"
             "1️⃣ /browse → Pilih kategori → Lihat project\n"
             "2️⃣ /monitor → Toggle kategori yang mau dipantau\n"
-            "3️⃣ Bot akan auto-notifikasi kalau ada project baru\n\n"
+            "3️⃣ Bot akan auto-notifikasi kalau ada project baru (dengan intel)\n\n"
             "<b>Config:</b>\n"
             "Set <code>POLL_INTERVAL</code> di .env untuk ubah frekuensi polling (default: 300s)\n"
             "Set <code>PROJECTS_PER_PAGE</code> untuk ubah jumlah project per halaman (default: 10)",
