@@ -32,6 +32,14 @@ from fastwork_scraper import (
     FastworkJob,
 )
 
+from sribu_scraper import (
+    scrape_sribu_listing,
+    scrape_new_contests,
+    get_sribu_categories,
+    SribuContest,
+    scrape_detail_budget,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -48,6 +56,8 @@ SEEN_FILE = os.path.join(DATA_DIR, "seen_projects.json")
 MONITOR_FILE = os.path.join(DATA_DIR, "monitor_config.json")
 FW_SEEN_FILE = os.path.join(DATA_DIR, "fastwork_seen.json")
 FW_MONITOR_FILE = os.path.join(DATA_DIR, "fastwork_monitor.json")
+SRIBU_SEEN_FILE = os.path.join(DATA_DIR, "sribu_seen.json")
+SRIBU_MONITOR_FILE = os.path.join(DATA_DIR, "sribu_monitor.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -149,6 +159,69 @@ class FastworkMonitorConfig:
             self.monitored_tags.discard(tag_id)
         else:
             self.monitored_tags.add(tag_id)
+        self._save()
+
+
+class SribuSeenTracker:
+    """Persistently tracks which Sribu contest IDs have been notified."""
+
+    def __init__(self, data_file: str):
+        self.data_file = data_file
+        self.seen_ids: set[str] = set()
+        self._load()
+
+    def _load(self):
+        if os.path.exists(self.data_file):
+            with open(self.data_file, "r") as f:
+                self.seen_ids = set(json.load(f))
+            logger.info(f"Loaded {len(self.seen_ids)} seen Sribu contest IDs")
+
+    def _save(self):
+        with open(self.data_file, "w") as f:
+            json.dump(list(self.seen_ids), f, indent=2)
+
+    def is_seen(self, contest_id: str) -> bool:
+        return contest_id in self.seen_ids
+
+    def mark_seen(self, contest_id: str):
+        self.seen_ids.add(contest_id)
+        self._save()
+
+
+class SribuMonitorConfig:
+    """Manages per-category Sribu monitoring configuration."""
+
+    def __init__(self, data_file: str):
+        self.data_file = data_file
+        self.monitored_categories: set[str] = set()
+        self._load()
+
+    def _load(self):
+        if os.path.exists(self.data_file):
+            with open(self.data_file, "r") as f:
+                data = json.load(f)
+                self.monitored_categories = set(data.get("categories", []))
+            logger.info(f"Loaded Sribu monitor config: {len(self.monitored_categories)} categories")
+        else:
+            # Default: monitor website & programming + logo & branding
+            self.monitored_categories = {
+                "f9e36e5f-d6f9-4c1a-b5d4-e9f8c8a3b7d2",  # Website & Programming
+                "1ef818a5-3a17-4dd1-80e2-685cf3da5946",  # Logo & Branding
+            }
+            self._save()
+
+    def _save(self):
+        with open(self.data_file, "w") as f:
+            json.dump({"categories": list(self.monitored_categories)}, f, indent=2)
+
+    def is_monitored(self, category_id: str) -> bool:
+        return category_id in self.monitored_categories
+
+    def toggle(self, category_id: str):
+        if category_id in self.monitored_categories:
+            self.monitored_categories.discard(category_id)
+        else:
+            self.monitored_categories.add(category_id)
         self._save()
 
 
@@ -623,6 +696,7 @@ def build_main_menu_keyboard() -> dict:
         "inline_keyboard": [
             [{"text": "🌐 Projects.co.id", "callback_data": "src:projects"}],
             [{"text": "⚡ Fastwork.id", "callback_data": "src:fastwork"}],
+            [{"text": "🎨 Sribu.com", "callback_data": "src:sribu"}],
             [{"text": "🔙 Back", "callback_data": "menu:back"}],
         ]
     }
@@ -646,6 +720,15 @@ def build_platform_submenu(source: str) -> dict:
                 [{"text": "📋 Browse Fastwork Jobs", "callback_data": "fw:browse"}],
                 [{"text": "🔔 Monitor Fastwork", "callback_data": "fw:monitor"}],
                 [{"text": "🔄 Refresh Fastwork", "callback_data": "fw:refresh"}],
+                [{"text": "🔙 Back to Sources", "callback_data": "src:back"}],
+            ]
+        }
+    elif source == "sribu":
+        return {
+            "inline_keyboard": [
+                [{"text": "📋 Browse Contests", "callback_data": "sribu:browse"}],
+                [{"text": "🔔 Monitor Sribu", "callback_data": "sribu:monitor"}],
+                [{"text": "🔄 Refresh Sribu", "callback_data": "sribu:refresh"}],
                 [{"text": "🔙 Back to Sources", "callback_data": "src:back"}],
             ]
         }
@@ -745,6 +828,70 @@ def build_fastwork_monitor_keyboard(fw_monitor: FastworkMonitorConfig) -> dict:
     buttons.append([{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}])
 
     return {"inline_keyboard": buttons}
+
+
+# ============================================================
+# Sribu Message Formatters
+# ============================================================
+
+
+def _build_sribu_detail_keyboard(contest: SribuContest) -> dict:
+    """Build a keyboard with a View button for a Sribu contest."""
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "🔗 View Contest",
+                    "url": contest.contest_url,
+                }
+            ],
+            [
+                {"text": "🔙 Back to Contests", "callback_data": "sribu_cat:all:1"},
+            ],
+        ]
+    }
+
+
+def format_sribu_contest_card(contest: SribuContest, index: int = 0) -> str:
+    """Format a single Sribu contest as a detailed card."""
+    tags_str = ", ".join(contest.tags[:5]) if contest.tags else "-"
+    budget_str = contest.budget or contest.budget_raw or "Scraping..."
+
+    card_lines = [
+        f"🎨 <b>#{index + 1} {contest.title}</b>\n",
+        f"📝 <i>{_truncate(contest.description, 300) if contest.description else '(Tidak ada deskripsi)'}</i>\n",
+        f"💰 <b>Budget:</b> {budget_str}\n",
+        f"📂 <b>Kategori:</b> {contest.category_emoji} {contest.category_name}\n",
+        f"📅 <b>Deadline:</b> {contest.deadline_formatted}\n",
+        f"📊 <b>Status:</b> {contest.status_label}\n",
+    ]
+
+    if tags_str and tags_str != "-":
+        card_lines.append(f"🏷️ <b>Tags:</b> {tags_str}\n")
+
+    return "".join(card_lines)
+
+
+def format_sribu_contests_list(
+    contests: list[SribuContest], category: str, page: int, total_pages: int
+) -> str:
+    """Format a paginated list of Sribu contests."""
+    header = (
+        f"🎨 <b>{category}</b> — Page {page}/{total_pages}\n"
+        f"📊 {len(contests)} contests ditemukan\n"
+    )
+
+    items = []
+    for i, c in enumerate(contests):
+        budget_str = c.budget or c.budget_raw or "-"
+        items.append(
+            f"<b>#{i + 1}</b> {c.title}\n"
+            f"   💰 {budget_str}  •  📅 {c.deadline_formatted}  •  "
+            f"{c.category_emoji} {c.category_name}\n"
+            f"   📊 {c.status_label}  •  🏷️ {', '.join(c.tags[:2]) if c.tags else '-'}\n"
+        )
+
+    return header + "\n\n".join(items)
 
 
 # ============================================================
@@ -873,6 +1020,21 @@ class FastworkJobCache:
         self._cache.clear()
 
 
+class SribuContestCache:
+    """Cache Sribu contests per category+page for detail view resolution."""
+
+    def __init__(self):
+        self._cache: dict[str, list[SribuContest]] = {}
+
+    def store(self, category_id: str, page: int, contests: list[SribuContest]):
+        key = f"{category_id}:{page}"
+        self._cache[key] = contests
+
+    def get(self, category_id: str, page: int) -> list[SribuContest]:
+        key = f"{category_id}:{page}"
+        return self._cache.get(key, [])
+
+
 class ProjectCache:
     """Cache projects per category+page for callback resolution."""
 
@@ -904,6 +1066,9 @@ class ProjectsBot:
         self.monitor = MonitorConfig(MONITOR_FILE)
         self.fw_tracker = FastworkSeenTracker(FW_SEEN_FILE)
         self.fw_monitor = FastworkMonitorConfig(FW_MONITOR_FILE)
+        self.sribu_tracker = SribuSeenTracker(SRIBU_SEEN_FILE)
+        self.sribu_monitor = SribuMonitorConfig(SRIBU_MONITOR_FILE)
+        self.sribu_cache = SribuContestCache()
         self.cache = ProjectCache()
         self.fw_cache = FastworkJobCache()
         self._running = False
@@ -943,6 +1108,8 @@ class ProjectsBot:
             await self._cmd_top_clients(chat_id)
         elif text in ("/fw", "/fastwork"):
             await self._cmd_fastwork(chat_id)
+        elif text in ("/sribu", "/contest"):
+            await self._cmd_sribu(chat_id)
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
@@ -1012,6 +1179,21 @@ class ProjectsBot:
                 await self._fw_monitor(chat_id, message_id, callback_id)
             elif action == "src":
                 await self._cb_source_select(chat_id, message_id, parts[1], callback_id)
+            elif action == "sribu":
+                await self._cb_sribu(chat_id, message_id, parts[1], callback_id)
+            elif action == "sribu_cat":
+                cat_id = parts[1]
+                page = int(parts[2])
+                await self._sribu_show_page(chat_id, message_id, cat_id, page)
+            elif action == "sribu_detail":
+                cat_id = parts[1]
+                page = int(parts[2])
+                contest_idx = int(parts[3])
+                await self._sribu_show_detail(chat_id, message_id, cat_id, page, contest_idx)
+            elif action == "sribu_mon":
+                cat_id = parts[1]
+                self.sribu_monitor.toggle(cat_id)
+                await self._sribu_monitor(chat_id, message_id, callback_id)
         except Exception as e:
             logger.error(f"Callback handler error: {e}")
             await answer_callback(
@@ -1149,6 +1331,44 @@ class ProjectsBot:
         await send_message(
             TELEGRAM_BOT_TOKEN, chat_id,
             f"⚡ <b>Fastwork Categories</b>\n\n{cat_text}\n\nPilih kategori:",
+            reply_markup={"inline_keyboard": buttons},
+        )
+
+    async def _cmd_sribu(self, chat_id: str):
+        """Handle /sribu command — browse Sribu contests."""
+        cats = get_sribu_categories()
+        if not cats:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "🎨 <b>Sribu Categories</b>\n\nTidak ada kategori ditemukan.",
+                reply_markup=build_platform_submenu("sribu"),
+            )
+            return
+
+        buttons = []
+        row = []
+        # Add "All" button
+        row.append({"text": "🌐 Semua Kategori", "callback_data": "sribu_cat:all:1"})
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+
+        for cat in cats:
+            row.append({
+                "text": f"{cat['emoji']} {cat['name']}",
+                "callback_data": f"sribu_cat:{cat['id']}:1",
+            })
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        buttons.append([{"text": "🔙 Back to Sources", "callback_data": "src:back"}])
+
+        cat_text = "\n".join([f"• {c['emoji']} {c['name']}" for c in cats[:8]])
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            f"🎨 <b>Sribu Categories</b>\n\n{cat_text}\n\nPilih kategori:",
             reply_markup={"inline_keyboard": buttons},
         )
 
@@ -1405,6 +1625,191 @@ class ProjectsBot:
             "(Enabled = dapat notifikasi project baru)",
             reply_markup=build_fastwork_monitor_keyboard(self.fw_monitor),
         )
+
+    # ---- Sribu Handlers ----
+
+    async def _cb_sribu(
+        self, chat_id: str, message_id: int, action: str, callback_id: str
+    ):
+        """Handle Sribu sub-menu callbacks."""
+        await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
+
+        if action == "browse":
+            await self._cmd_sribu(chat_id)
+        elif action == "monitor":
+            await self._sribu_monitor(chat_id, message_id, callback_id)
+        elif action == "refresh":
+            await self._sribu_refresh(chat_id, message_id)
+
+    async def _sribu_show_page(
+        self, chat_id: str, message_id: int, category_id: str, page: int
+    ):
+        """Show a page of Sribu contests for a given category."""
+        PER_PAGE = 8
+
+        # Fetch contests (API returns 10 per page, fetch 3 pages for local pagination)
+        contests = scrape_sribu_listing(category_id, page, PER_PAGE)
+
+        # For "all" we need to get more pages to handle pagination
+        if category_id == "all":
+            all_contests = []
+            for p in range(1, 4):
+                page_conts = scrape_sribu_listing("all", p, 10)
+                all_contests.extend(page_conts)
+                if not page_conts:
+                    break
+            contests = all_contests
+
+        total = len(contests)
+        total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+        page = min(page, total_pages)
+        start = (page - 1) * PER_PAGE
+        end = start + PER_PAGE
+        page_contests = contests[start:end]
+
+        if not page_contests:
+            await edit_message(
+                TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
+                "🎨 Tidak ada contest ditemukan di kategori ini."
+            )
+            return
+
+        # Store in cache for detail resolution
+        self.sribu_cache.store(category_id, page, page_contests)
+
+        cat_name = "Semua Kategori" if category_id == "all" else (
+            next((c["name"] for c in get_sribu_categories() if c["id"] == category_id), category_id)
+        )
+
+        text = format_sribu_contests_list(page_contests, cat_name, page, total_pages)
+
+        # Build per-contest View buttons + navigation
+        buttons = []
+        for i, contest in enumerate(page_contests):
+            global_idx = start + i
+            budget_str = contest.budget or contest.budget_raw or "-"
+            btn_row = [
+                {"text": "🔗 View", "url": contest.contest_url},
+                {"text": f"📋 #{global_idx + 1}", "callback_data": f"sribu_detail:{category_id}:{page}:{global_idx}"},
+            ]
+            buttons.append(btn_row)
+
+        # Navigation
+        nav_row = []
+        if page > 1:
+            nav_row.append({"text": "⬅️ Prev", "callback_data": f"sribu_cat:{category_id}:{page - 1}"})
+        nav_row.append({"text": f"📄 {page}/{total_pages}", "callback_data": "noop"})
+        if page < total_pages:
+            nav_row.append({"text": "Next ➡️", "callback_data": f"sribu_cat:{category_id}:{page + 1}"})
+        if nav_row:
+            buttons.append(nav_row)
+
+        buttons.append([{"text": "🔙 Back to Categories", "callback_data": "sribu:browse"}])
+        buttons.append([{"text": "🏠 Main Menu", "callback_data": "menu:back"}])
+
+        await edit_message(
+            TELEGRAM_BOT_TOKEN,
+            int(chat_id),
+            message_id,
+            text,
+            reply_markup={"inline_keyboard": buttons},
+        )
+
+    async def _sribu_show_detail(
+        self, chat_id: str, message_id: int, category_id: str, page: int, contest_idx: int
+    ):
+        """Show full contest detail (card view) with View button."""
+        # Get from cache
+        if category_id == "all":
+            all_contests = []
+            for p in range(1, 4):
+                page_conts = scrape_sribu_listing("all", p, 10)
+                all_contests.extend(page_conts)
+                if not page_conts:
+                    break
+            contests = all_contests
+        else:
+            contests = self.sribu_cache.get(category_id, page)
+
+        if not contests or contest_idx >= len(contests):
+            await edit_message(
+                TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
+                "⚠️ Contest tidak ditemukan. Coba kembali ke halaman sebelumnya."
+            )
+            return
+
+        contest = contests[contest_idx]
+
+        text = format_sribu_contest_card(contest, 0)
+        keyboard = _build_sribu_detail_keyboard(contest)
+
+        await edit_message(
+            TELEGRAM_BOT_TOKEN,
+            int(chat_id),
+            message_id,
+            text,
+            reply_markup=keyboard,
+        )
+
+    async def _sribu_monitor(self, chat_id: str, message_id: int, callback_id: str):
+        """Show Sribu monitoring settings."""
+        cats = get_sribu_categories()
+        buttons = []
+
+        for cat in cats:
+            is_on = self.sribu_monitor.is_monitored(cat["id"])
+            status = "✅" if is_on else "⬜"
+            buttons.append([{
+                "text": f"{status} {cat['emoji']} {cat['name']}",
+                "callback_data": f"sribu_mon:{cat['id']}",
+            }])
+
+        buttons.append([{"text": "🔙 Back to Sribu", "callback_data": "src:sribu"}])
+
+        await edit_message(
+            TELEGRAM_BOT_TOKEN,
+            int(chat_id),
+            message_id,
+            "🎨 <b>Sribu Monitor Settings</b>\n\n"
+            "Pilih kategori untuk toggle monitoring:\n"
+            "(Enabled = dapat notifikasi contest baru)",
+            reply_markup={"inline_keyboard": buttons},
+        )
+
+    async def _sribu_refresh(self, chat_id: str, message_id: int):
+        """Refresh Sribu contests and show new ones."""
+        await edit_message(
+            TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
+            "🎨 <b>Refreshing Sribu...</b>\nSedang mengambil contest terbaru..."
+        )
+
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            contests = await loop.run_in_executor(executor, lambda: scrape_sribu_listing("all", 1, 10))
+
+        new_contests = [c for c in contests if not self.sribu_tracker.is_seen(c.contest_id)]
+
+        if new_contests:
+            text = f"🎨 <b>{len(new_contests)} Contest Baru Ditemukan!</b>\n\n"
+            for i, c in enumerate(new_contests[:10]):
+                text += format_sribu_contest_card(c, i)
+                text += "\n"
+                self.sribu_tracker.mark_seen(c.contest_id)
+
+            if len(new_contests) > 10:
+                text += f"\n...dan {len(new_contests) - 10} contest lainnya."
+
+            await edit_message(
+                TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
+                text,
+                reply_markup=build_main_menu_keyboard(),
+            )
+        else:
+            await edit_message(
+                TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
+                "✅ <b>Tidak ada contest baru</b>\nSemua contest sudah di-notifikasi.",
+                reply_markup=build_main_menu_keyboard(),
+            )
 
     # ---- Callback Handlers ----
 
@@ -1789,7 +2194,6 @@ class ProjectsBot:
         )
 
     async def start_polling(self):
-        """Start the monitoring polling loop."""
         self._running = True
         logger.info(f"Monitoring started. Polling every {POLL_INTERVAL_SECONDS}s")
 
@@ -1806,6 +2210,10 @@ class ProjectsBot:
         fw_monitored = [fw_cats.get(t, t) for t in self.fw_monitor.monitored_tags]
         fw_list = "\n".join(f"  ⚡ {n}" for n in fw_monitored)
 
+        sribu_cats = {c["id"]: c["name"] for c in get_sribu_categories()}
+        sribu_monitored = [sribu_cats.get(t, t) for t in self.sribu_monitor.monitored_categories]
+        sribu_list = "\n".join(f"  🎨 {n}" for n in sribu_monitored)
+
         await send_message(
             TELEGRAM_BOT_TOKEN,
             TELEGRAM_CHAT_ID,
@@ -1813,8 +2221,11 @@ class ProjectsBot:
             "🌐 <b>Projects.co.id</b>\n"
             f"🔔 Monitoring <b>{len(monitored)}</b> kategori\n\n"
             "⚡ <b>Fastwork.id</b>\n"
-            f"🔔 Monitoring <b>{len(fw_monitored)}</b> kategori\n\n"
+            f"🔔 Monitoring <b>{len(fw_monitored)}</b> kategori\n"
             f"{fw_list or '  ⬜ Belum ada yang dimonitor'}\n\n"
+            "🎨 <b>Sribu.com</b>\n"
+            f"🔔 Monitoring <b>{len(sribu_monitored)}</b> kategori\n"
+            f"{sribu_list or '  ⬜ Belum ada yang dimonitor'}\n\n"
             "Polling setiap <b>{POLL_INTERVAL_SECONDS}s</b>",
             reply_markup=build_main_menu_keyboard(),
         )
@@ -1948,6 +2359,52 @@ class ProjectsBot:
                                 )
                     except Exception as e:
                         logger.error(f"Fastwork polling error: {e}")
+
+                # ---- Sribu Polling ----
+                if self.sribu_monitor.monitored_categories:
+                    try:
+                        loop = asyncio.get_event_loop()
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            new_contests = await loop.run_in_executor(
+                                executor, scrape_new_contests, self.sribu_tracker.seen_ids
+                            )
+
+                        if new_contests:
+                            logger.info(f"🎨 {len(new_contests)} new Sribu contests")
+
+                            # Group by category
+                            by_cat: dict[str, list[SribuContest]] = {}
+                            for contest in new_contests:
+                                if contest.category_id not in by_cat:
+                                    by_cat[contest.category_id] = []
+                                by_cat[contest.category_id].append(contest)
+
+                            cats = {c["id"]: c for c in get_sribu_categories()}
+
+                            for cat_id, contests in by_cat.items():
+                                cat_info = cats.get(cat_id, {})
+                                cat_name = cat_info.get("name", "Unknown")
+                                cat_emoji = cat_info.get("emoji", "🎨")
+                                for i, contest in enumerate(contests[:5]):
+                                    text = format_sribu_contest_card(contest, i)
+                                    keyboard = _build_sribu_detail_keyboard(contest)
+                                    await send_message(
+                                        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+                                        f"🎨 <b>Contest Baru!</b> di {cat_emoji} <b>{cat_name}</b>\n\n" + text
+                                        if i == 0 else text,
+                                        reply_markup=keyboard,
+                                    )
+                                    self.sribu_tracker.mark_seen(contest.contest_id)
+                                    await asyncio.sleep(0.5)
+
+                            if len(new_contests) > 8:
+                                await send_message(
+                                    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+                                    f"...dan <b>{len(new_contests) - 8}</b> contest Sribu lainnya. "
+                                    f"Gunakan /sribu untuk lihat semua."
+                                )
+                    except Exception as e:
+                        logger.error(f"Sribu polling error: {e}")
 
             except Exception as e:
                 logger.error(f"Polling error: {e}")
