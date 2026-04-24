@@ -1207,9 +1207,10 @@ class ProjectsBot:
             TELEGRAM_BOT_TOKEN,
             chat_id,
             "🤖 <b>Freelance Monitor Bot</b>\n\n"
-            "Pantau project freelance dari 2 sumber:\n"
+            "Pantau project freelance dari 3 sumber:\n"
             "🌐 <b>Projects.co.id</b> — Web dev, mobile, data entry, dll\n"
-            "⚡ <b>Fastwork.id</b> — Desain, UX/UI, fotografi, dll\n\n"
+            "⚡ <b>Fastwork.id</b> — Desain, UX/UI, fotografi, dll\n"
+            "🎨 <b>Sribu.com</b> — Logo, branding, kemasan, desain\n\n"
             "✨ <b>Fitur:</b>\n"
             "• 📋 Browse project per kategori (tiap sumber)\n"
             "• 🔔 Auto-notifikasi project baru (dengan intel)\n"
@@ -1424,17 +1425,19 @@ class ProjectsBot:
                 message_id,
                 "🤖 <b>Freelance Monitor Bot</b>\n\n"
                 "🌐 <b>Projects.co.id</b> — Web dev, mobile, data entry, dll\n"
-                "⚡ <b>Fastwork.id</b> — Desain, UX/UI, fotografi, dll\n\n"
+                "⚡ <b>Fastwork.id</b> — Desain, UX/UI, fotografi, dll\n"
+                "🎨 <b>Sribu.com</b> — Logo, branding, kemasan, desain\n\n"
                 "Pilih sumber:",
                 reply_markup=build_main_menu_keyboard(),
             )
-        elif action in ("projects", "fastwork"):
-            platform = "Projects.co.id" if action == "projects" else "Fastwork.id"
+        elif action in ("projects", "fastwork", "sribu"):
+            platform_map = {"projects": "Projects.co.id", "fastwork": "Fastwork.id", "sribu": "Sribu.com"}
+            platform = platform_map.get(action, action)
             await edit_message(
                 TELEGRAM_BOT_TOKEN,
                 int(chat_id),
                 message_id,
-                f"⚡ <b>{platform}</b> — Pilih aksi:",
+                f"🎨 <b>{platform}</b> — Pilih aksi:",
                 reply_markup=build_platform_submenu(action),
             )
 
