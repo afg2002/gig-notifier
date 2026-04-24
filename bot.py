@@ -791,7 +791,6 @@ def format_fastwork_job_card(job: FastworkJob, index: int = 0) -> str:
     status_text = status_map.get(job.status.lower() if job.status else "", f"📊 {job.status}") if job.status else "📊 Unknown"
 
     card_lines = [
-        f"{'─' * 30}",
         f"⚡ <b>#{index + 1} {job.title}</b>\n",
         f"📝 <i>{_truncate(job.description, 300)}</i>\n",
         f"💰 <b>Budget:</b> {job.budget}\n",
