@@ -5,14 +5,27 @@ Handles Cloudflare bypass, adaptive element tracking, and category filtering.
 
 import re
 import logging
+import cloudscraper as _cloudscraper
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-from curl_cffi import requests
+from curl_cffi import requests as _curl_requests
 from scrapling import Selector
 from scrapling.fetchers import StealthyFetcher
 
-# Obscura headless browser (for Cloudflare bypass)
+# ── cloudscraper: primary fetcher (bypasses Cloudflare JS challenge in ~0.2s) ──
+# Reuse session so Cloudflare clearance token is cached between calls.
+_SCRAPER = None
+
+def _get_scraper():
+    global _SCRAPER
+    if _SCRAPER is None:
+        _SCRAPER = _cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
+    return _SCRAPER
+
+# Obscura headless browser (last-resort fallback)
 try:
     import obscurascrape as obscura
     OBSCURA_AVAILABLE = obscura.is_available()
@@ -183,28 +196,46 @@ def _first(selector_list):
 
 
 def _fetch_html(url: str) -> Selector:
-    """Fetch HTML using curl_cffi with Chrome impersonation.
-    Falls back to Obscura headless browser (Cloudflare bypass), then StealthyFetcher."""
+    """Fetch HTML from projects.co.id.
+    Strategy (fastest → slowest):
+      1. cloudscraper  — bypasses Cloudflare JS challenge, ~0.2s, session-cached token
+      2. curl_cffi     — Chrome TLS fingerprint, ~0.5s (Cloudflare might still 403)
+      3. Obscura       — real headless Chrome, 6-10s (last resort, only if above fail)
+    """
+    # ── Primary: cloudscraper (fastest, bypasses Cloudflare JS) ──────────────
     try:
-        r = requests.get(url, impersonate="chrome120", timeout=30)
-        r.raise_for_status()
+        scraper = _get_scraper()
+        resp = scraper.get(url, timeout=30)
+        resp.raise_for_status()
         # Detect Cloudflare challenge page
+        if "cf-chl-bypass" in resp.text[:5000] or "Just a moment..." in resp.text:
+            raise ValueError("Cloudflare challenge detected")
+        logger.info(f"cloudscraper fetched {url} ({len(resp.text)} bytes)")
+        return Selector(content=resp.text, url=url)
+    except Exception as e:
+        logger.warning(f"cloudscraper failed ({e})")
+
+    # ── Fallback 1: curl_cffi Chrome impersonation ───────────────────────────
+    try:
+        r = _curl_requests.get(url, impersonate="chrome120", timeout=30)
+        r.raise_for_status()
         if "cf-chl-bypass" in r.headers or "captcha" in r.text.lower()[:5000]:
             raise ValueError("Cloudflare challenge detected")
+        logger.info(f"curl_cffi fetched {url} ({len(r.text)} bytes)")
         return Selector(content=r.text, url=url)
     except Exception as e:
         logger.warning(f"curl_cffi failed ({e})")
 
-    # Fallback 1: Obscura headless browser (preferred — better stealth)
+    # ── Fallback 2: Obscura headless browser ─────────────────────────────────
     if OBSCURA_AVAILABLE:
         try:
             logger.info(f"Falling back to Obscura for {url}")
-            html = obscura.fetch_html(url, wait_until="networkidle0", stealth=True)
+            html = obscura.fetch_html(url, wait_until="domcontentloaded", stealth=True)
             return Selector(content=html, url=url)
         except Exception as ex:
             logger.warning(f"Obscura failed ({ex})")
 
-    # Fallback 2: StealthyFetcher (last resort)
+    # ── Fallback 3: StealthyFetcher (last resort) ───────────────────────────
     try:
         logger.warning(f"Falling back to StealthyFetcher for {url}")
         StealthyFetcher.adaptive = True
