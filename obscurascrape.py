@@ -37,6 +37,7 @@ FALLBACK_BINS = [
     Path("/usr/local/bin/obscura"),
     Path("./obscura"),
     Path("/tmp/obscura/target/release/obscura"),
+    Path("/usr/bin/obscura"),
 ]
 
 
@@ -51,7 +52,7 @@ def _find_obscura() -> Optional[Path]:
 
 
 def _run_obscura(args: list[str], timeout: int = 30) -> str:
-    """Run obscura CLI and return stdout."""
+    """Run obscura CLI and return stdout. Silences stderr to suppress console noise."""
     bin_path = _find_obscura()
     if not bin_path:
         raise RuntimeError(
@@ -63,22 +64,20 @@ def _run_obscura(args: list[str], timeout: int = 30) -> str:
 
     cmd = [str(bin_path)] + args
     logger.debug(f"[Obscura] Running: {' '.join(cmd)}")
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        if result.returncode != 0:
-            logger.warning(f"obscura returned {result.returncode}: {result.stderr[:200]}")
-        return result.stdout
-    except subprocess.TimeoutExpired:
-        logger.error(f"obscura timed out after {timeout}s: {' '.join(args)}")
-        raise
+    # Obscura outputs HTML to stderr, not stdout — merge them so we capture HTML from result.stdout
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        logger.warning(f"obscura returned {result.returncode}")
+    return result.stdout
 
 
-def fetch_html(url: str, wait_until: str = "networkidle0", stealth: bool = True) -> str:
+def fetch_html(url: str, wait_until: str = "load", stealth: bool = True, timeout: int = 60) -> str:
     """
     Fetch a URL and return rendered HTML after JavaScript execution.
 
@@ -86,8 +85,10 @@ def fetch_html(url: str, wait_until: str = "networkidle0", stealth: bool = True)
         url: Target URL
         wait_until: When to consider page loaded.
                     Options: 'load', 'domcontentloaded', 'networkidle0'
-                    Use 'networkidle0' for SPAs like sribu.com Next.js pages.
+                    Use 'load' for most pages (faster, more reliable).
+                    'networkidle0' may timeout on pages with analytics/telemetry pings.
         stealth: Enable anti-detection measures (recommended).
+        timeout: Max seconds to wait per request (default 60 — Obscura is slow).
 
     Returns:
         Rendered HTML as string.
@@ -96,15 +97,14 @@ def fetch_html(url: str, wait_until: str = "networkidle0", stealth: bool = True)
     if stealth:
         args.append("--stealth")
     args.extend(["--wait-until", wait_until])
-    args.append("--quiet")
 
     logger.info(f"[Obscura] Fetching {url} (stealth={stealth}, wait_until={wait_until})")
-    html = _run_obscura(args)
+    html = _run_obscura(args, timeout=timeout)
     logger.info(f"[Obscura] Got {len(html)} bytes from {url}")
     return html
 
 
-def fetch_text(url: str, selector: str, wait_until: str = "networkidle0", stealth: bool = True) -> Optional[str]:
+def fetch_text(url: str, selector: str, wait_until: str = "load", stealth: bool = True) -> Optional[str]:
     """
     Fetch a URL and extract text content from the first element matching CSS selector.
 
@@ -129,7 +129,6 @@ def fetch_text(url: str, selector: str, wait_until: str = "networkidle0", stealt
         "--eval", js_expr,
         "--stealth" if stealth else None,
         "--wait-until", wait_until,
-        "--quiet",
     ]
     args = [a for a in args if a]
 
@@ -139,7 +138,7 @@ def fetch_text(url: str, selector: str, wait_until: str = "networkidle0", stealt
     return output
 
 
-def fetch_json(url: str, js_expr: str, wait_until: str = "networkidle0", stealth: bool = True) -> Optional[dict]:
+def fetch_json(url: str, js_expr: str, wait_until: str = "load", stealth: bool = True) -> Optional[dict]:
     """
     Fetch a URL and evaluate a JS expression, parsing result as JSON.
 
@@ -159,7 +158,6 @@ def fetch_json(url: str, js_expr: str, wait_until: str = "networkidle0", stealth
         "--eval", wrapped,
         "--stealth" if stealth else None,
         "--wait-until", wait_until,
-        "--quiet",
     ]
     args = [a for a in args if a]
 
@@ -225,52 +223,36 @@ def scrape_sribu_budget(contest_id: str) -> Optional[str]:
     """
     url = f"https://www.sribu.com/contests/detail/{contest_id}"
 
-    # Strategy 1: Try Next.js __NEXT_DATA__ which contains page props
-    next_data = fetch_json(
-        url,
-        "__NEXT_DATA__.props.pageProps.contest.prize",
-        wait_until="networkidle0",
-        stealth=True,
-    )
-    if next_data and next_data not in ("null", ""):
-        logger.info(f"[Obscura] Sribu budget for {contest_id} (from __NEXT_DATA__): {next_data}")
-        return next_data
+    # domcontentloaded fires after SSR HTML is received but before full JS hydration.
+    # This is enough to capture budget data which is in the initial HTML payload.
+    html = fetch_html(url, wait_until="domcontentloaded", stealth=False, timeout=90)
 
-    # Strategy 2: Try priceMin/priceMax fields
-    price_data = fetch_json(
-        url,
-        "__NEXT_DATA__.props.pageProps.contest.priceMin",
-        wait_until="networkidle0",
-        stealth=True,
-    )
-    if price_data and price_data not in ("null", ""):
+    # Strategy 1: Try __NEXT_DATA__ JSON embedded in page (contains prize)
+    import re, json
+    next_data_match = re.search(r'__NEXT_DATA__[^>]*>([^<]+)', html)
+    if next_data_match:
         try:
-            val = float(price_data)
-            budget = f"Rp {val:,.0f}"
-            logger.info(f"[Obscura] Sribu budget for {contest_id} (priceMin): {budget}")
-            return budget
-        except (ValueError, TypeError):
+            next_data = json.loads(next_data_match.group(1))
+            prize = (
+                next_data.get("props", {})
+                .get("pageProps", {})
+                .get("contest", {})
+                .get("prize")
+            )
+            if prize:
+                logger.info(f"[Obscura] Sribu budget for {contest_id} (from __NEXT_DATA__): {prize}")
+                return prize
+        except (json.JSONDecodeError, KeyError):
             pass
 
-    # Strategy 3: Try JS-based element extraction
-    budget = fetch_text(
-        url,
-        selector="[class*='budget'], [class*='prize'], [class*='harga'], .price, .budget-info, [data-prize]",
-        wait_until="networkidle0",
-        stealth=True,
-    )
-    if budget:
-        logger.info(f"[Obscura] Sribu budget for {contest_id}: {budget}")
-        return budget
-
-    # Strategy 4: Last resort — extract Rp pattern from rendered HTML
-    html = fetch_html(url, wait_until="networkidle0", stealth=True)
-    rp_matches = re.findall(r'Rp\s*[\d\.,]+', html)
+    # Strategy 2: Regex Rp patterns from rendered HTML (e.g., Rp3Jt, Rp5.000.000)
+    rp_matches = re.findall(r'Rp(\d+(?:\.\d+)?\s*(?:Jt|Juta|Rp|rbu|Rb|000)\b)', html, re.IGNORECASE)
     if rp_matches:
-        # Deduplicate and return the most informative one (longest match = most precise)
         best = max(rp_matches, key=len)
-        logger.info(f"[Obscura] Sribu budget for {contest_id} (HTML fallback): {best}")
-        return best
+        budget = f"Rp {best.replace('Rp', '').strip()}"
+        if budget:
+            logger.info(f"[Obscura] Sribu budget for {contest_id}: {budget}")
+            return budget
 
     logger.warning(f"[Obscura] Could not find budget for Sribu contest {contest_id}")
     return None
