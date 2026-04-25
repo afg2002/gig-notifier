@@ -207,13 +207,30 @@ def scrape_listing(
 
 def scrape_detail_budget(contest_id: str) -> Optional[str]:
     """
-    Scrape budget from contest detail page using browser.
-    Requires headless browser (Playwright/Puppeteer) since page is Next.js SSR.
-    Returns budget string like "Rp 5.000.000" or None if not found.
+    Scrape budget/prize from sribu.com contest detail page using Obscura.
+    The page is Next.js SSR — curl_cffi/urllib only get the shell.
+    Uses Obscura headless browser to render JS and extract budget.
+
+    Args:
+        contest_id: Sribu contest UUID
+
+    Returns:
+        Budget string like 'Rp 5.000.000' or None if not found.
     """
-    # This would be called by bot.py which has browser access
-    # For now, return None - bot.py will handle browser scraping
-    return None
+    try:
+        import obscurascrape as obscura
+
+        if not obscura.is_available():
+            logger.warning("Obscura not available, cannot scrape Sribu budget")
+            return None
+
+        return obscura.scrape_sribu_budget(contest_id)
+    except ImportError:
+        logger.warning("obscurascrape module not found, cannot scrape Sribu budget")
+        return None
+    except Exception as e:
+        logger.error(f"Error scraping Sribu budget for {contest_id}: {e}")
+        return None
 
 
 def scrape_new_contests(

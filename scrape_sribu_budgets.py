@@ -44,53 +44,29 @@ def save_budget_cache(cache: dict):
 
 def scrape_budget_via_browser(contest_id: str) -> str:
     """
-    Use the hermes-agent's browser tool to fetch budget from detail page.
-    This reads from the mcp_browser_* tool output to get page content.
+    Scrape budget from sribu.com contest detail page.
     
-    Since we can't call MCP tools from a standalone script directly,
-    we'll use the browser session that should already be running.
-    
-    For standalone use, we try curl-based approaches first.
+    Strategy:
+    1. Try Obscura headless browser (best — renders Next.js SSR)
+    2. Fall back to nothing if not available
+
+    Obscura is preferred over hermes-agent's mcp_browser_* tools because
+    this runs as a standalone cron script, not inside the agent session.
     """
-    # Try the API first to see if budget is accessible via API now
-    from sribu_scraper import _api_request
-    
-    # Try to get budget via GraphQL with different field names
-    query = f"""
-    query GetContestBudget {{
-        getContest(id: "{contest_id}") {{
-            prize
-            budget
-            amount
-            price
-            min_budget
-            max_budget
-            contest_draft {{
-                prize
-                price
-                budget
-            }}
-        }}
-    }}
-    """
-    result = _api_request(query, {})
-    
-    # Check for errors or data
-    if "errors" not in result or not result["errors"]:
-        data = result.get("data", {}).get("getContest", {})
-        if data:
-            for field in ["prize", "budget", "amount", "price", "min_budget"]:
-                val = data.get(field)
-                if val:
-                    return str(val)
-            draft = data.get("contest_draft", {})
-            if draft:
-                for field in ["prize", "price", "budget"]:
-                    val = draft.get(field)
-                    if val:
-                        return str(val)
-    
-    return None
+    try:
+        import obscurascrape as obscura
+
+        if not obscura.is_available():
+            logger.warning("Obscura not available, cannot scrape Sribu budget")
+            return None
+
+        return obscura.scrape_sribu_budget(contest_id)
+    except ImportError:
+        logger.warning("obscurascrape not installed, cannot scrape Sribu budget")
+        return None
+    except Exception as e:
+        logger.error(f"Error scraping budget for {contest_id}: {e}")
+        return None
 
 
 def parse_budget_from_html(html: str, contest_url: str) -> str:

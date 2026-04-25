@@ -12,6 +12,14 @@ from curl_cffi import requests
 from scrapling import Selector
 from scrapling.fetchers import StealthyFetcher
 
+# Obscura headless browser (for Cloudflare bypass)
+try:
+    import obscurascrape as obscura
+    OBSCURA_AVAILABLE = obscura.is_available()
+except ImportError:
+    obscura = None
+    OBSCURA_AVAILABLE = False
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
@@ -176,7 +184,7 @@ def _first(selector_list):
 
 def _fetch_html(url: str) -> Selector:
     """Fetch HTML using curl_cffi with Chrome impersonation.
-    Falls back to StealthyFetcher (browser) if blocked."""
+    Falls back to Obscura headless browser (Cloudflare bypass), then StealthyFetcher."""
     try:
         r = requests.get(url, impersonate="chrome120", timeout=30)
         r.raise_for_status()
@@ -185,7 +193,20 @@ def _fetch_html(url: str) -> Selector:
             raise ValueError("Cloudflare challenge detected")
         return Selector(content=r.text, url=url)
     except Exception as e:
-        logger.warning(f"curl_cffi failed ({e}), falling back to StealthyFetcher...")
+        logger.warning(f"curl_cffi failed ({e})")
+
+    # Fallback 1: Obscura headless browser (preferred — better stealth)
+    if OBSCURA_AVAILABLE:
+        try:
+            logger.info(f"Falling back to Obscura for {url}")
+            html = obscura.fetch_html(url, wait_until="networkidle0", stealth=True)
+            return Selector(content=html, url=url)
+        except Exception as ex:
+            logger.warning(f"Obscura failed ({ex})")
+
+    # Fallback 2: StealthyFetcher (last resort)
+    try:
+        logger.warning(f"Falling back to StealthyFetcher for {url}")
         StealthyFetcher.adaptive = True
         fetched = StealthyFetcher.fetch(
             url,
@@ -194,6 +215,9 @@ def _fetch_html(url: str) -> Selector:
             block_images=True,
         )
         return fetched
+    except Exception as ex:
+        logger.error(f"All fetchers failed for {url}: {ex}")
+        raise
 
 
 def scrape_listing(category_id: str = "all", page: int = 1) -> list[Project]:
