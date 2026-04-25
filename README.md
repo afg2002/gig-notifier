@@ -13,7 +13,7 @@
 
 ## ✨ Features
 
-- **🌐 Dual Source Monitoring** — Projects.co.id + Fastwork.id in one bot
+- **🌐 Triple Source Monitoring** — Projects.co.id + Fastwork.id + Sribu.com in one bot
 - **📂 Category Browsing** — Navigate projects via interactive inline keyboards (per platform)
 - **📄 Smart Pagination** — Configurable projects per page with Prev/Next navigation
 - **🔔 Real-time Monitoring** — Background polling with instant Telegram notifications for new listings
@@ -22,7 +22,7 @@
 - **👤 Client Reputation** — Track client history: Veteran (10+ projects), Regular (5+), Known (1-4)
 - **📊 Daily Digest** — Automated 9 PM summary of all new projects + cron job
 - **🏆 Top Clients** — Top 10 clients by project volume with avg budget
-- **🛡️ Cloudflare Resilience** — Built-in bypass via Scrapling's StealthyFetcher
+- **🛡️ Cloudflare Resilience** — cloudscraper fallback chain: cloudscraper → curl_cffi → Obscura → StealthyFetcher
 - **💾 Persistent State** — Seen projects and monitor config survive restarts
 - **🎨 Rich UI** — Emoji-formatted cards, inline buttons, structured layout
 
@@ -31,8 +31,9 @@
 | Layer | Technology |
 |---|---|
 | **Language** | Python 3.11+ |
-| **Projects.co.id** | [Scrapling](https://github.com/D4Vinci/Scrapling) — adaptive parser + StealthyFetcher |
+| **Projects.co.id** | cloudscraper → curl_cffi → Obscura (StealthyFetcher) fallback chain |
 | **Fastwork.id** | Direct REST API (`jobboard-api.fastwork.id`) — no browser needed |
+| **Sribu.com** | GraphQL API (`app.api.v2.sribu.com/graphql`) — no auth, no browser |
 | **HTTP Client** | stdlib `urllib` + `httpx` for Telegram API |
 | **Bot API** | Telegram Bot API (long polling, no external framework) |
 | **Persistence** | JSON file storage (zero dependencies) |
@@ -59,7 +60,7 @@ source venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 
-# Install Chromium for StealthyFetcher (Projects.co.id scraping)
+# Install Chromium for StealthyFetcher fallback (Projects.co.id only)
 patchright install chromium
 ```
 
@@ -73,7 +74,7 @@ cp .env.example .env
 Edit `.env` with your credentials:
 
 ```env
-TELEGRAM_BOT_TOKEN=123456...ew11
+TELEGRAM_BOT_TOKEN=***
 TELEGRAM_CHAT_ID=123456789
 POLL_INTERVAL=300
 PROJECTS_PER_PAGE=10
@@ -98,14 +99,15 @@ Send `/start` to your bot on Telegram to begin.
 
 | Command | Description |
 |---|---|
-| `/start` | Main menu — choose platform (Projects.co.id or Fastwork.id) |
+| `/start` | Main menu — choose platform (Projects.co.id, Fastwork.id, or Sribu.com) |
 | `/browse` | Browse Projects.co.id projects by category |
 | `/monitor` | Configure Projects.co.id per-category monitoring |
 | `/refresh` | Manually check for new Projects.co.id projects |
-| `/status` | View current Projects.co.id monitoring config |
-| `/digest` | View today's project digest (Projects.co.id) |
-| `/topclients` | Top 10 clients by project count |
+| `/status` | View current monitoring config (all platforms) |
+| `/digest` | View today's project digest (all platforms) |
+| `/topclients` | Top 10 clients by project count (Projects.co.id) |
 | `/fw` | Browse Fastwork.id jobs by category |
+| `/sribu` | Browse Sribu.com contests by category |
 | `/help` | Show help and usage information |
 
 ## 🗂️ Project Structure
@@ -113,17 +115,22 @@ Send `/start` to your bot on Telegram to begin.
 ```
 gig-notifier/
 ├── bot.py                  # Telegram bot — commands, callbacks, polling, monitoring
-├── scraper.py              # Projects.co.id scraping engine — adaptive parsing
+├── scraper.py              # Projects.co.id scraping engine — adaptive parsing + cloudscraper
 ├── fastwork_scraper.py     # Fastwork.id API integration — REST client
+├── sribu_scraper.py        # Sribu.com GraphQL integration — contest listing + detail
+├── obscurascrape.py        # Obscura headless browser (StealthyFetcher fallback)
+├── scrape_sribu_budgets.py # Budget detail scraper for Sribu (HTML rendering)
 ├── requirements.txt        # Python package dependencies
 ├── .env.example            # Environment variable template
 ├── .gitignore              # Git ignore rules
 ├── data/                   # Runtime data (auto-generated, gitignored)
 │   ├── seen_projects.json        # Projects.co.id seen IDs (deduplication)
-│   ├── fastwork_seen.json        # Fastwork.id seen job IDs
-│   ├── monitor_config.json      # Projects.co.id per-category monitoring state
+│   ├── fastwork_seen.json         # Fastwork.id seen job IDs
+│   ├── sribu_seen.json           # Sribu.com seen contest IDs
+│   ├── monitor_config.json        # Projects.co.id per-category monitoring state
 │   ├── fastwork_monitor.json     # Fastwork.id per-category monitoring state
-│   ├── client_stats.json        # Client reputation tracking
+│   ├── sribu_monitor.json        # Sribu.com per-category monitoring state
+│   ├── client_stats.json         # Client reputation tracking (Projects.co.id)
 │   ├── category_budget_stats.json # Category avg budget for competitive intel
 │   └── daily_digest.json        # Today's project tracking for digest
 └── README.md               # This file
@@ -140,21 +147,23 @@ gig-notifier/
 ┌────────────────▼──────────────────────────▼─────────────────┐
 │                         bot.py                                │
 │  ┌─────────────────────────────────────────────────────┐     │
-│  │              Dual-Source Platform Menu               │     │
-│  │    🌐 Projects.co.id    ⚡ Fastwork.id              │     │
+│  │           Triple-Source Platform Menu                │     │
+│  │  🌐 Projects.co.id  ⚡ Fastwork.id  🎨 Sribu.com  │     │
 │  └─────────────────────────────────────────────────────┘     │
-│         │                                    │               │
-│  ┌──────▼──────┐                   ┌───────▼───────┐       │
-│  │  Projects.co │                   │  Fastwork.id   │       │
-│  │  .id Module │                   │  API Module    │       │
-│  └──────┬──────┘                   └───────┬───────┘       │
-│         │                                  │                │
-│  ┌──────▼──────────────────────────────────▼───────┐         │
-│  │         Background Monitoring Loop (async)      │         │
-│  │  Polls both platforms every POLL_INTERVAL sec    │         │
-│  │  Tracks seen IDs, groups by category            │         │
-│  │  Sends competitive intel + client reputation     │         │
-│  └─────────────────────────────────────────────────┘         │
+│         │                │                    │               │
+│  ┌──────▼──────┐  ┌──────▼──────┐     ┌──────▼──────┐      │
+│  │  Projects   │  │  Fastwork   │     │    Sribu    │      │
+│  │  .co.id     │  │    .id      │     │    .com     │      │
+│  │  scraper.py │  │ fastwork_   │     │  sribu_     │      │
+│  │             │  │ scraper.py  │     │  scraper.py │      │
+│  └──────┬──────┘  └──────┬──────┘     └──────┬──────┘      │
+│         │                │                    │               │
+│  ┌──────▼──────────────────────────────────────▼───────┐     │
+│  │         Background Monitoring Loop (async)         │     │
+│  │  Polls all platforms every POLL_INTERVAL sec        │     │
+│  │  Tracks seen IDs, groups by category              │     │
+│  │  Sends competitive intel + client reputation       │     │
+│  └─────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -191,6 +200,18 @@ gig-notifier/
 | `b1a4abc1-...` | Teknik Audio |
 | `f257cc79-...` | Lainnya |
 
+### Sribu.com
+
+| ID | Name | Emoji |
+|---|---|---|
+| `f9e36e5f-...` | Website & Programming | 💻 |
+| `1ef818a5-...` | Logo & Branding | 🎨 |
+| `7c0786ec-...` | Desain Logo | 🎨 |
+| `4f69e2a5-...` | Kemasan | 📦 |
+| `a1b2c3d4-...` | Video & Audio | 🎬 |
+| `b2c3d4e5-...` | Writing & Translation | ✍️ |
+| `c3d4e5f6-...` | Digital Marketing | 📱 |
+
 ## 🧠 Competitive Intel
 
 Every notification includes budget comparison and client reputation:
@@ -209,7 +230,7 @@ Every notification includes budget comparison and client reputation:
 ## 📊 Daily Digest
 
 Automatic 9 PM summary via cron job:
-- All new projects grouped by category
+- All new projects grouped by category (all platforms)
 - Budget comparison per project
 - Client reputation badges
 - Triggered by `/digest` command anytime
@@ -243,5 +264,8 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 - [Scrapling](https://github.com/D4Vinci/Scrapling) — Adaptive web scraping framework
 - [Patchright](https://github.com/D4Vinci/patchright) — Stealth browser automation
+- [cloudscraper](https://github.com/viaforensics/cloudscraper) — Cloudflare bypass
+- [curl_cffi](https://github.com/FFEFFF/curl_cffi) — TLS fingerprint impersonation
 - [Telegram Bot API](https://core.telegram.org/bots/api) — Bot platform
 - [Fastwork](https://www.fastwork.id) — Freelance platform
+- [Sribu](https://www.sribu.com) — Design & creative contest platform
