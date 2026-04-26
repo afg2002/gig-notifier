@@ -617,7 +617,8 @@ def format_project_card(project: Project, index: int = 0) -> str:
 
 
 def format_project_list(
-    projects: list[Project], category: dict, page: int, total_pages: int
+    projects: list[Project], category: dict, page: int, total_pages: int,
+    start_index: int = 0
 ) -> str:
     """Format a paginated list of projects."""
     cat_emoji = category.get("emoji", "📋")
@@ -634,7 +635,7 @@ def format_project_list(
         bid_emoji = "🔥" if bid_count > 20 else "👥" if bid_count > 5 else "🆕"
         budget_short = p.budget or "N/A"
         items.append(
-            f"<b>#{i + 1}</b> {p.title}\n"
+            f"<b>#{start_index + i + 1}</b> {p.title}\n"
             f"   💰 {budget_short}\n"
             f"   {bid_emoji} {p.bid_count or '0'} bids  •  "
             f"📅 {p.published_date or '-'}"
@@ -873,7 +874,8 @@ def format_sribu_contest_card(contest: SribuContest, index: int = 0) -> str:
 
 
 def format_sribu_contests_list(
-    contests: list[SribuContest], category: str, page: int, total_pages: int
+    contests: list[SribuContest], category: str, page: int, total_pages: int,
+    start_index: int = 0
 ) -> str:
     """Format a paginated list of Sribu contests."""
     header = (
@@ -885,7 +887,7 @@ def format_sribu_contests_list(
     for i, c in enumerate(contests):
         budget_str = c.budget or c.budget_raw or "-"
         items.append(
-            f"<b>#{i + 1}</b> {c.title}\n"
+            f"<b>#{start_index + i + 1}</b> {c.title}\n"
             f"   💰 {budget_str}  •  📅 {c.deadline_formatted}  •  "
             f"{c.category_emoji} {c.category_name}\n"
             f"   📊 {c.status_label}  •  🏷️ {', '.join(c.tags[:2]) if c.tags else '-'}\n"
@@ -961,7 +963,8 @@ def format_fastwork_job_card(job: FastworkJob, index: int = 0) -> str:
 
 
 def format_fastwork_jobs_list(
-    jobs: list[FastworkJob], category: str, page: int, total_pages: int
+    jobs: list[FastworkJob], category: str, page: int, total_pages: int,
+    start_index: int = 0
 ) -> str:
     """Format a paginated list of Fastwork jobs (matching Projects.co.id list style)."""
     header = (
@@ -975,7 +978,7 @@ def format_fastwork_jobs_list(
         type_emoji = "💻" if job.type == "freelance" else "⏰" if job.type == "contract" else "🌐"
         budget_short = job.budget or "N/A"
         items.append(
-            f"<b>#{i + 1}</b> {job.title}\n"
+            f"<b>#{start_index + i + 1}</b> {job.title}\n"
             f"   💰 {budget_short}  •  {type_emoji} {job.type or '-'}  •  "
             f"{offers_emoji} {job.offers_count} offers\n"
             f"   📂 {job.tag_name}  •  📅 {job.published_date}"
@@ -1516,7 +1519,7 @@ class ProjectsBot:
             cats = {c["id"]: c["name"] for c in get_fastwork_categories()}
             cat_name = cats.get(tag_id, tag_id)
 
-        text = format_fastwork_jobs_list(page_jobs, cat_name, page, total_pages)
+        text = format_fastwork_jobs_list(page_jobs, cat_name, page, total_pages, start)
 
         # Build per-job View buttons + navigation
         buttons = []
@@ -1684,7 +1687,7 @@ class ProjectsBot:
             next((c["name"] for c in get_sribu_categories() if c["id"] == category_id), category_id)
         )
 
-        text = format_sribu_contests_list(page_contests, cat_name, page, total_pages)
+        text = format_sribu_contests_list(page_contests, cat_name, page, total_pages, start)
 
         # Build per-contest View buttons + navigation
         buttons = []
@@ -2003,7 +2006,7 @@ class ProjectsBot:
         # Cache ALL projects for detail callbacks
         self.cache.store(category_id, 0, all_projects)
 
-        text = format_project_list(page_projects, category, page, total_pages)
+        text = format_project_list(page_projects, category, page, total_pages, start)
         kb = self._build_project_keyboard(category_id, page, total_pages, page_projects)
 
         await edit_message(
@@ -2077,7 +2080,7 @@ class ProjectsBot:
         end = start + PROJECTS_PER_PAGE
         page_projects = all_projects[start:end]
 
-        text = format_project_list(page_projects, category, page, total_pages)
+        text = format_project_list(page_projects, category, page, total_pages, start)
         kb = self._build_project_keyboard(category_id, page, total_pages, page_projects)
 
         await edit_message(
