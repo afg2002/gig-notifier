@@ -61,6 +61,14 @@ SRIBU_MONITOR_FILE = os.path.join(DATA_DIR, "sribu_monitor.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
+
+def get_chat_ids() -> list[str]:
+    """Parse TELEGRAM_CHAT_ID env var (comma-separated) into a list of chat IDs."""
+    raw = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not raw:
+        return []
+    return [cid.strip() for cid in raw.split(",") if cid.strip()]
+
 # Telegram API base
 TG_API = "https://api.telegram.org/bot"
 
@@ -533,7 +541,39 @@ async def send_message(
     reply_markup: dict | None = None,
     parse_mode: str = "HTML",
 ) -> dict:
-    """Send a message with optional inline keyboard."""
+    """Send a message with optional inline keyboard.
+
+    When chat_id equals TELEGRAM_CHAT_ID (which may contain comma-separated IDs),
+    automatically broadcasts to all configured chat IDs.
+    """
+    # Check if this is the broadcast target (env var)
+    broadcast_ids = get_chat_ids()
+    target_ids = [cid.strip() for cid in chat_id.split(",") if cid.strip()]
+
+    # If the target matches the env var pattern, broadcast to all
+    if chat_id == TELEGRAM_CHAT_ID and len(broadcast_ids) > 1:
+        results = []
+        for cid in broadcast_ids:
+            payload = {
+                "chat_id": cid,
+                "text": text,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": True,
+            }
+            if reply_markup:
+                payload["reply_markup"] = json.dumps(reply_markup)
+            try:
+                result = await tg_request(token, "sendMessage", payload)
+                if not result.get("ok"):
+                    logger.error(f"Telegram broadcast error to {cid}: {result}")
+                results.append(result.get("ok", False))
+            except Exception as e:
+                logger.error(f"Failed to send to {cid}: {e}")
+                results.append(False)
+            await asyncio.sleep(0.3)
+        return {"ok": all(results), "broadcast": True, "results": results}
+
+    # Single recipient
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -547,6 +587,20 @@ async def send_message(
     if not result.get("ok"):
         logger.error(f"Telegram API error: {result}")
     return result
+
+
+async def broadcast(token: str, chat_ids: list[str], text: str, reply_markup: dict | None = None, parse_mode: str = "HTML") -> dict:
+    """Send a message to multiple chat IDs. Returns aggregated results."""
+    results = []
+    for chat_id in chat_ids:
+        try:
+            result = await send_message(token, chat_id, text, reply_markup, parse_mode)
+            results.append({"chat_id": chat_id, "ok": result.get("ok", False)})
+        except Exception as e:
+            logger.error(f"Failed to send to {chat_id}: {e}")
+            results.append({"chat_id": chat_id, "ok": False, "error": str(e)})
+        await asyncio.sleep(0.3)
+    return {"ok": True, "results": results}
 
 
 async def edit_message(
@@ -1458,15 +1512,26 @@ class ProjectsBot:
             await self._fw_monitor(chat_id, message_id, callback_id)
 
     async def _fw_browse(self, chat_id: str, message_id: int, callback_id: str):
-        """Show Fastwork job categories."""
+        """Show Fastwork job categories — only monitored ones."""
         cats = get_fastwork_categories()
         if not cats:
             await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="⚠️ Gagal load kategori Fastwork")
             return
 
+        monitored = self.fw_monitor.monitored_tags
+        cats_to_show = [c for c in cats if c["id"] in monitored]
+
+        if not cats_to_show:
+            await edit_message(
+                TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
+                "⚠️ Kamu tidak memantau kategori Fastwork mana pun.\n\nGunakan /fw setup untuk menambahkan kategori.",
+                reply_markup={"inline_keyboard": [[{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}]]},
+            )
+            return
+
         buttons = []
         row = []
-        for cat in cats:
+        for cat in cats_to_show:
             row.append({
                 "text": cat["name"],
                 "callback_data": f"fwcat:{cat['id']}:1",
@@ -1478,12 +1543,12 @@ class ProjectsBot:
             buttons.append(row)
         buttons.append([{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}])
 
-        cat_text = "\n".join([f"• {c['name']}" for c in cats[:14]])
+        cat_text = "\n".join([f"• {c['name']}" for c in cats_to_show])
         await edit_message(
             TELEGRAM_BOT_TOKEN,
             int(chat_id),
             message_id,
-            f"⚡ <b>Fastwork Categories</b>\n\n{cat_text}\n\nPilih kategori:",
+            f"⚡ <b>Fastwork Categories</b> (yang kamu monitor)\n\n{cat_text}\n\nPilih kategori:",
             reply_markup={"inline_keyboard": buttons},
         )
 
@@ -1494,9 +1559,29 @@ class ProjectsBot:
 
         Jobs are cached in fw_cache for detail view resolution.
         Each job gets a 'View' URL button and a 'Detail' callback button.
+        Only shows jobs from monitored tags.
         """
         PER_PAGE = 8
-        all_jobs, _ = get_jobs_by_tag(tag_id=tag_id if tag_id != "all" else None, max_pages=10)
+        monitored = self.fw_monitor.monitored_tags
+
+        # "all" → only monitored tags; specific tag → verify it's monitored
+        if tag_id == "all":
+            all_jobs, _ = get_jobs_by_tag(tag_id=None, max_pages=10)
+            # Filter to only monitored tags
+            all_jobs = [j for j in all_jobs if j.tag_id in monitored]
+        else:
+            if tag_id not in monitored:
+                await edit_message(
+                    TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
+                    "⚠️ Kategori ini tidak kamu monitor.\n\nGunakan /fw setup untuk menambahkan.",
+                    reply_markup={"inline_keyboard": [
+                        [{"text": "🔙 Back to Categories", "callback_data": "fw:browse"}],
+                        [{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}],
+                    ]},
+                )
+                return
+            all_jobs, _ = get_jobs_by_tag(tag_id=tag_id, max_pages=10)
+
         total = len(all_jobs)
         total_pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
         page = min(page, total_pages)
@@ -1578,8 +1663,16 @@ class ProjectsBot:
         )
 
     async def _fw_refresh(self, chat_id: str, message_id: int, callback_id: str):
-        """Show latest Fastwork jobs."""
+        """Show latest Fastwork jobs from monitored categories only."""
+        monitored = self.fw_monitor.monitored_tags
+        if not monitored:
+            await answer_callback(TELEGRAM_BOT_TOKEN, callback_id,
+                text="⚠️ Kamu tidak memantau kategori Fastwork mana pun.\nGunakan /fw setup untuk menambahkan.")
+            return
+
         all_jobs, _ = get_jobs_by_tag(max_pages=3)
+        # Filter to only monitored tags
+        all_jobs = [j for j in all_jobs if j.tag_id in monitored]
         jobs = all_jobs[:10]
         total = len(all_jobs)
 
@@ -2220,21 +2313,42 @@ class ProjectsBot:
         sribu_monitored = [sribu_cats.get(t, t) for t in self.sribu_monitor.monitored_categories]
         sribu_list = "\n".join(f"  🎨 {n}" for n in sribu_monitored)
 
-        await send_message(
-            TELEGRAM_BOT_TOKEN,
-            TELEGRAM_CHAT_ID,
-            "🤖 <b>Freelance Monitor Bot Active!</b>\n\n"
-            "🌐 <b>Projects.co.id</b>\n"
-            f"🔔 Monitoring <b>{len(monitored)}</b> kategori\n\n"
-            "⚡ <b>Fastwork.id</b>\n"
-            f"🔔 Monitoring <b>{len(fw_monitored)}</b> kategori\n"
-            f"{fw_list or '  ⬜ Belum ada yang dimonitor'}\n\n"
-            "🎨 <b>Sribu.com</b>\n"
-            f"🔔 Monitoring <b>{len(sribu_monitored)}</b> kategori\n"
-            f"{sribu_list or '  ⬜ Belum ada yang dimonitor'}\n\n"
-            "Polling setiap <b>{POLL_INTERVAL_SECONDS}s</b>",
-            reply_markup=build_main_menu_keyboard(),
-        )
+        chat_ids = get_chat_ids()
+        if not chat_ids:
+            logger.warning("No TELEGRAM_CHAT_ID configured, skipping startup notification")
+        elif len(chat_ids) == 1:
+            await send_message(
+                TELEGRAM_BOT_TOKEN,
+                chat_ids[0],
+                "🤖 <b>Freelance Monitor Bot Active!</b>\n\n"
+                "🌐 <b>Projects.co.id</b>\n"
+                f"🔔 Monitoring <b>{len(monitored)}</b> kategori\n\n"
+                "⚡ <b>Fastwork.id</b>\n"
+                f"🔔 Monitoring <b>{len(fw_monitored)}</b> kategori\n"
+                f"{fw_list or '  ⬜ Belum ada yang dimonitor'}\n\n"
+                "🎨 <b>Sribu.com</b>\n"
+                f"🔔 Monitoring <b>{len(sribu_monitored)}</b> kategori\n"
+                f"{sribu_list or '  ✔ Belum ada yang dimonitor'}\n\n"
+                f"Polling setiap <b>{POLL_INTERVAL_SECONDS}s</b>",
+                reply_markup=build_main_menu_keyboard(),
+            )
+        else:
+            # Multiple recipients — use broadcast for startup message
+            await broadcast(
+                TELEGRAM_BOT_TOKEN,
+                chat_ids,
+                "🤖 <b>Freelance Monitor Bot Active!</b>\n\n"
+                "🌐 <b>Projects.co.id</b>\n"
+                f"🔔 Monitoring <b>{len(monitored)}</b> kategori\n\n"
+                "⚡ <b>Fastwork.id</b>\n"
+                f"🔔 Monitoring <b>{len(fw_monitored)}</b> kategori\n"
+                f"{fw_list or '  ⬜ Belum ada yang dimonitor'}\n\n"
+                "🎨 <b>Sribu.com</b>\n"
+                f"🔔 Monitoring <b>{len(sribu_monitored)}</b> kategori\n"
+                f"{sribu_list or '  ⬜ Belum ada yang dimonitor'}\n\n"
+                f"Polling setiap <b>{POLL_INTERVAL_SECONDS}s</b>",
+                reply_markup=build_main_menu_keyboard(),
+            )
 
         while self._running:
             try:
@@ -2328,21 +2442,34 @@ class ProjectsBot:
                                 f"   📅 {p.published_date or '-'}  •  "
                                 f"🔗 <a href='{p.link}'>View →</a>\n"
                             )
-                            await send_message(
-                                TELEGRAM_BOT_TOKEN,
-                                TELEGRAM_CHAT_ID,
-                                header + msg if i == 0 else msg,
-                            )
+                            chat_ids = get_chat_ids()
+                            if len(chat_ids) > 1:
+                                await broadcast(
+                                    TELEGRAM_BOT_TOKEN, chat_ids,
+                                    header + msg,
+                                )
+                            else:
+                                await send_message(
+                                    TELEGRAM_BOT_TOKEN, chat_ids[0],
+                                    header + msg,
+                                )
                             self.tracker.mark_seen(p.project_id)
                             await asyncio.sleep(0.5)
 
                         if len(new_projects) > 5:
-                            await send_message(
-                                TELEGRAM_BOT_TOKEN,
-                                TELEGRAM_CHAT_ID,
-                                f"...dan <b>{len(new_projects) - 5}</b> project lainnya. "
-                                f"Gunakan /browse untuk lihat semua.",
-                            )
+                            chat_ids = get_chat_ids()
+                            if len(chat_ids) > 1:
+                                await broadcast(
+                                    TELEGRAM_BOT_TOKEN, chat_ids,
+                                    f"...dan <b>{len(new_projects) - 5}</b> project lainnya. "
+                                    f"Gunakan /browse untuk lihat semua.",
+                                )
+                            else:
+                                await send_message(
+                                    TELEGRAM_BOT_TOKEN, chat_ids[0],
+                                    f"...dan <b>{len(new_projects) - 5}</b> project lainnya. "
+                                    f"Gunakan /browse untuk lihat semua.",
+                                )
 
                 # No inter-category sleep needed — all ran in parallel
 
@@ -2368,23 +2495,47 @@ class ProjectsBot:
                             cats = {c["id"]: c["name"] for c in get_fastwork_categories()}
 
                             for tag_id, jobs in by_tag.items():
+                                if tag_id not in self.fw_monitor.monitored_tags:
+                                    continue  # skip unmonitored categories
                                 cat_name = cats.get(tag_id, "Unknown")
-                                for i, job in enumerate(jobs[:5]):
+                                # Deduplicate: some jobs may appear on multiple pages in API response
+                                seen_in_batch: set[str] = set()
+                                unique_jobs = [
+                                    j for j in jobs
+                                    if j.job_id not in seen_in_batch and not self.fw_tracker.is_seen(j.job_id)
+                                ]
+                                unique_jobs = unique_jobs[:5]
+                                for i, job in enumerate(unique_jobs):
                                     text = format_fastwork_job_card(job, i)
                                     keyboard = _build_fastwork_detail_keyboard(job)
-                                    await send_message(
-                                        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-                                        text, reply_markup=keyboard,
-                                    )
+                                    chat_ids = get_chat_ids()
+                                    if len(chat_ids) > 1:
+                                        await broadcast(
+                                            TELEGRAM_BOT_TOKEN, chat_ids,
+                                            text, reply_markup=keyboard,
+                                        )
+                                    else:
+                                        await send_message(
+                                            TELEGRAM_BOT_TOKEN, chat_ids[0],
+                                            text, reply_markup=keyboard,
+                                        )
                                     self.fw_tracker.mark_seen(job.job_id)
                                     await asyncio.sleep(0.5)
 
-                            if len(new_jobs) > 8:
-                                await send_message(
-                                    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-                                    f"...dan <b>{len(new_jobs) - 8}</b> job Fastwork lainnya. "
-                                    f"Gunakan /fw untuk lihat semua."
-                                )
+                                if len(unique_jobs) < len(new_jobs):
+                                    chat_ids = get_chat_ids()
+                                    if len(chat_ids) > 1:
+                                        await broadcast(
+                                            TELEGRAM_BOT_TOKEN, chat_ids,
+                                            f"...dan <b>{len(new_jobs) - 8}</b> job Fastwork lainnya. "
+                                            f"Gunakan /fw untuk lihat semua.",
+                                        )
+                                    else:
+                                        await send_message(
+                                            TELEGRAM_BOT_TOKEN, chat_ids[0],
+                                            f"...dan <b>{len(new_jobs) - 8}</b> job Fastwork lainnya. "
+                                            f"Gunakan /fw untuk lihat semua.",
+                                        )
                     except Exception as e:
                         logger.error(f"Fastwork polling error: {e}")
 
@@ -2416,21 +2567,35 @@ class ProjectsBot:
                                 for i, contest in enumerate(contests[:5]):
                                     text = format_sribu_contest_card(contest, i)
                                     keyboard = _build_sribu_detail_keyboard(contest)
-                                    await send_message(
-                                        TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-                                        f"🎨 <b>Contest Baru!</b> di {cat_emoji} <b>{cat_name}</b>\n\n" + text
-                                        if i == 0 else text,
-                                        reply_markup=keyboard,
-                                    )
+                                    first_msg = f"🎨 <b>Contest Baru!</b> di {cat_emoji} <b>{cat_name}</b>\n\n" + text if i == 0 else text
+                                    chat_ids = get_chat_ids()
+                                    if len(chat_ids) > 1:
+                                        await broadcast(
+                                            TELEGRAM_BOT_TOKEN, chat_ids,
+                                            first_msg, reply_markup=keyboard,
+                                        )
+                                    else:
+                                        await send_message(
+                                            TELEGRAM_BOT_TOKEN, chat_ids[0],
+                                            first_msg, reply_markup=keyboard,
+                                        )
                                     self.sribu_tracker.mark_seen(contest.contest_id)
                                     await asyncio.sleep(0.5)
 
                             if len(new_contests) > 8:
-                                await send_message(
-                                    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-                                    f"...dan <b>{len(new_contests) - 8}</b> contest Sribu lainnya. "
-                                    f"Gunakan /sribu untuk lihat semua."
-                                )
+                                chat_ids = get_chat_ids()
+                                if len(chat_ids) > 1:
+                                    await broadcast(
+                                        TELEGRAM_BOT_TOKEN, chat_ids,
+                                        f"...dan <b>{len(new_contests) - 8}</b> contest Sribu lainnya. "
+                                        f"Gunakan /sribu untuk lihat semua.",
+                                    )
+                                else:
+                                    await send_message(
+                                        TELEGRAM_BOT_TOKEN, chat_ids[0],
+                                        f"...dan <b>{len(new_contests) - 8}</b> contest Sribu lainnya. "
+                                        f"Gunakan /sribu untuk lihat semua.",
+                                    )
                     except Exception as e:
                         logger.error(f"Sribu polling error: {e}")
 
