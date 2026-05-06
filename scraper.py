@@ -499,31 +499,20 @@ def scrape_project_detail(url: str) -> ProjectDetail | None:
     # ── Fastwork.id ─────────────────────────────────────────────────────────
     elif "fastwork.id" in url:
         try:
-            scraper = _get_scraper()
-            resp = scraper.get(url, timeout=15)
-            html = resp.text
+            from fastwork_scraper import get_job_by_url
 
-            # Extract title
-            title_m = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
-            title = _clean_text(title_m.group(1)) if title_m else "Project Fastwork"
-
-            # Extract budget from common patterns
-            budget_m = re.search(r'(?:Budget|Price|Harga)[^$]*?(?:Rp|USD)\s*([\d.,]+)', html, re.I)
-            budget = budget_m.group(0) if budget_m else "-"
-
-            # Extract description
-            desc_m = re.search(r'"description"[^>]*>\s*([^"]{50,500})', html)
-            description = _clean_text(desc_m.group(1)) if desc_m else "Project dari Fastwork.id"
-
-            return ProjectDetail(
-                project_id="fastwork",
-                title=title,
-                description=description,
-                budget=budget,
-                client_name="Client",
-                source="fastwork.id",
-                url=url,
-            )
+            job = get_job_by_url(url)
+            if job:
+                return ProjectDetail(
+                    project_id=job.job_id,
+                    title=job.title,
+                    description=job.description,
+                    budget=job.budget,
+                    client_name=job.client_name or "Client",
+                    source="fastwork.id",
+                    url=url,
+                )
+            return None
         except Exception as e:
             logger.warning(f"Fastwork scrape failed: {e}")
             return None
@@ -541,9 +530,24 @@ def scrape_project_detail(url: str) -> ProjectDetail | None:
             desc_m = re.search(r'"description"[^>]*>\s*([^"]{50,500})', html)
             description = _clean_text(desc_m.group(1)) if desc_m else "Kontes desain dari Sribu.com"
 
-            # Sribu shows prize budget
-            budget_m = re.search(r'(?:Hadiah|Prize)[^$]*?(?:Rp|USD)\s*([\d.,]+)', html, re.I)
-            budget = budget_m.group(0) if budget_m else "Premio tidak ditentukan"
+            # Try to extract budget from HTML first
+            budget = None
+            budget_m = re.search(r'(?:Hadiah|Prize|Budget)[^$]*?(?:Rp|USD)\s*([\d.,]+)', html, re.I)
+            if budget_m:
+                budget = budget_m.group(0)
+
+            # If no budget in HTML, try Obscura headless browser
+            if not budget and OBSCURA_AVAILABLE:
+                contest_id_match = re.search(r'/contests/detail/([a-f0-9-]+)', url)
+                if contest_id_match:
+                    contest_id = contest_id_match.group(1)
+                    try:
+                        budget = obscura.scrape_sribu_budget(contest_id)
+                    except Exception as e:
+                        logger.warning(f"Obscura Sribu budget scrape failed: {e}")
+
+            if not budget:
+                budget = "Premio tidak ditentukan"
 
             return ProjectDetail(
                 project_id="sribu",

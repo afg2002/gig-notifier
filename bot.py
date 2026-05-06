@@ -2406,7 +2406,6 @@ class ProjectsBot:
                 reply_markup=build_monitor_keyboard(self.monitor),
             )
         elif action == "refresh":
-            await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="🔄 Loading project terbaru...")
             await self._cmd_refresh(chat_id, message_id)
         elif action == "digest":
             await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="📈 Generating digest...")
@@ -2799,21 +2798,27 @@ class ProjectsBot:
             )
             return
 
-        # Show typing + loading
-        await send_message(
-            TELEGRAM_BOT_TOKEN, chat_id,
+        # Show loading — EDIT existing message
+        await edit_message(
+            TELEGRAM_BOT_TOKEN,
+            int(chat_id),
+            message_id,
             f"📝 <b>Generating AI Proposal...</b>\n\n"
             f"🌐 {proj_url}\n\n"
-            "Mohon tunggu sebentar, AI sedang membuat proposal..."
+            "Mohon tunggu sebentar, AI sedang membuat proposal...",
+            reply_markup={"inline_keyboard": [[{"text": "⏳ Processing...", "callback_data": "noop"}]]},
         )
 
         # Check rate limit
         allowed, remaining = _check_rate_limit(chat_id)
         if not allowed:
-            await send_message(
-                TELEGRAM_BOT_TOKEN, chat_id,
+            await edit_message(
+                TELEGRAM_BOT_TOKEN,
+                int(chat_id),
+                message_id,
                 f"⏳ <b>Batas proposal harian tercapai</b>\n\n"
-                f"Sisa: 0/5. Coba lagi besok!"
+                f"Sisa: 0/5. Coba lagi besok!",
+                reply_markup={"inline_keyboard": [[{"text": "🏠 Main Menu", "callback_data": "menu:back"}]]},
             )
             return
 
@@ -2849,28 +2854,38 @@ class ProjectsBot:
             _increment_proposal_count(chat_id)
 
             display = format_proposal_for_display(proposal, project_title, display_source)
+            # Send proposal as new message (it's long, edit may hit length limit)
             await send_message(TELEGRAM_BOT_TOKEN, chat_id, display)
 
-            if cv_text:
-                await send_message(
-                    TELEGRAM_BOT_TOKEN, chat_id,
-                    f"✅ Proposal {'' if was_cached else 'di-generate '}dengan CV Anda.\n"
-                    f"Sisa proposal: {remaining - 1}/5"
-                )
-            else:
-                await send_message(
-                    TELEGRAM_BOT_TOKEN, chat_id,
+            tip_text = (
+                f"✅ Proposal {'' if was_cached else 'di-generate '}dengan CV Anda.\n"
+                f"Sisa proposal: {remaining - 1}/5\n\n"
+                "Pilih menu di bawah:" if cv_text else (
                     f"💡 <b>Tips:</b> Upload CV dengan <code>/uploadcv</code> "
                     f"untuk proposal lebih personal.\n"
-                    f"Sisa proposal: {remaining - 1}/5"
+                    f"Sisa proposal: {remaining - 1}/5\n\n"
+                    "Pilih menu di bawah:"
                 )
+            )
+
+            await edit_message(
+                TELEGRAM_BOT_TOKEN,
+                int(chat_id),
+                message_id,
+                tip_text,
+                reply_markup=build_main_menu_keyboard(),
+            )
 
         except Exception as e:
             logger.error(f"AI Proposal error: {e}")
-            await send_message(
-                TELEGRAM_BOT_TOKEN, chat_id,
+            await edit_message(
+                TELEGRAM_BOT_TOKEN,
+                int(chat_id),
+                message_id,
                 "❌ <b>Gagal generate proposal</b>\n\n"
-                "Coba lagi nanti."
+                "Coba lagi nanti.\n\n"
+                "Pilih menu di bawah:",
+                reply_markup=build_main_menu_keyboard(),
             )
 
     async def _cb_monitor_toggle(
