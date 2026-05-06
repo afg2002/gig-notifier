@@ -82,11 +82,12 @@ SRIBU_MONITOR_FILE = os.path.join(DATA_DIR, "sribu_monitor.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # Webhook configuration
-WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://gregory-advise-nickel-entering.trycloudflare.com")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://compliant-chief-flavor-stickers.trycloudflare.com")
 WEBHOOK_PATH = "/webhook"
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret_token_123")
+WEBHOOK_SECRET=os.getenv("WEBHOOK_SECRET", "afghan_secret_2026")
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8082"))
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+WEBHOOK_ENABLED = os.getenv("WEBHOOK_ENABLED", "false").lower() == "true"
 
 
 def get_chat_ids() -> list[str]:
@@ -617,17 +618,37 @@ async def send_message(
 
 
 async def broadcast(token: str, chat_ids: list[str], text: str, reply_markup: dict | None = None, parse_mode: str = "HTML") -> dict:
-    """Send a message to multiple chat IDs. Returns aggregated results."""
+    """Send a message to multiple chat IDs. Returns aggregated results.
+    
+    Directly sends to each recipient using tg_request to avoid any dual-mode
+    logic that could cause sends to only reach some users.
+    """
     results = []
     for chat_id in chat_ids:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True,
+        }
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup)
         try:
-            result = await send_message(token, chat_id, text, reply_markup, parse_mode)
-            results.append({"chat_id": chat_id, "ok": result.get("ok", False)})
+            result = await tg_request(token, "sendMessage", payload)
+            ok = result.get("ok", False)
+            if ok:
+                logger.info(f"✅ Broadcast sent to {chat_id}")
+            else:
+                logger.error(f"❌ Broadcast failed to {chat_id}: {result}")
+            results.append({"chat_id": chat_id, "ok": ok, "result": result})
         except Exception as e:
-            logger.error(f"Failed to send to {chat_id}: {e}")
+            logger.error(f"❌ Exception sending to {chat_id}: {e}")
             results.append({"chat_id": chat_id, "ok": False, "error": str(e)})
         await asyncio.sleep(0.3)
-    return {"ok": True, "results": results}
+    
+    success_count = sum(1 for r in results if r.get("ok", False))
+    logger.info(f"Broadcast complete: {success_count}/{len(results)} successful")
+    return {"ok": success_count == len(results), "results": results}
 
 
 async def edit_message(
@@ -2474,14 +2495,8 @@ class ProjectsBot:
             f"Seed complete. {len(self.tracker.seen_ids)} projects marked as seen."
         )
 
-    async def start_polling(self):
-        self._running = True
-        logger.info(f"Monitoring started. Polling every {POLL_INTERVAL_SECONDS}s")
-
-        # Seed existing projects so we only notify truly new ones
-        await self._seed_seen_projects()
-
-        # Send startup notification
+    async def _send_startup_notification(self):
+        """Send startup notification to configured chat IDs."""
         monitored = [
             c for c in CATEGORIES if c["id"] in self.monitor.monitored_categories
         ]
@@ -2531,6 +2546,33 @@ class ProjectsBot:
                 f"Polling setiap <b>{POLL_INTERVAL_SECONDS}s</b>",
                 reply_markup=build_main_menu_keyboard(),
             )
+
+    async def start_polling(self):
+        """Start polling mode - handles both Telegram messages AND project monitoring.
+        
+        This combines Telegram polling via getUpdates with the monitoring loop.
+        Use this when WEBHOOK_ENABLED=false (default).
+        """
+        self._running = True
+        logger.info(f"Monitoring started. Polling every {POLL_INTERVAL_SECONDS}s")
+
+        # Seed existing projects so we only notify truly new ones
+        await self._seed_seen_projects()
+
+        # Send startup notification
+        await self._send_startup_notification()
+
+        # Run monitoring loop (this includes all scraping logic)
+        await self.monitoring_loop()
+
+    async def monitoring_loop(self):
+        """Monitoring loop - scrapes projects and sends notifications.
+        
+        This is the scraping-only loop (no Telegram polling).
+        Used when webhook mode is enabled - Telegram messages are handled by webhook_server().
+        """
+        self._running = True
+        logger.info(f"Monitoring loop started. Polling every {POLL_INTERVAL_SECONDS}s")
 
         while self._running:
             try:
@@ -2871,9 +2913,31 @@ async def webhook_server(bot: 'ProjectsBot'):
 async def main():
     bot = ProjectsBot()
 
-    # Start monitoring loop (scraping + notifications)
-    # Note: Webhook temporarily disabled due to spam issues
-    await bot.start_polling()
+    if WEBHOOK_ENABLED:
+        # Webhook mode: handle Telegram via webhook, monitoring loop runs separately
+        logger.info(f"Starting in WEBHOOK mode")
+        logger.info(f"Webhook URL: {WEBHOOK_URL}")
+
+        # Set webhook with Telegram
+        await set_webhook(TELEGRAM_BOT_TOKEN, WEBHOOK_URL, WEBHOOK_SECRET)
+
+        # Seed existing projects so we only notify truly new ones
+        await bot._seed_seen_projects()
+
+        # Send startup notification
+        await bot._send_startup_notification()
+
+        # Start webhook server (handles Telegram messages) and monitoring loop (scrapes projects)
+        # These run in parallel - webhook handles user commands, monitoring_loop handles scraping
+        webhook_task = asyncio.create_task(webhook_server(bot))
+        monitor_task = asyncio.create_task(bot.monitoring_loop())
+
+        logger.info("Running with webhook + monitoring loop")
+        await asyncio.gather(webhook_task, monitor_task)
+    else:
+        # Polling mode (default): start_polling() handles everything
+        logger.info("Starting in POLLING mode (WEBHOOK_ENABLED=false)")
+        await bot.start_polling()
 
 
 if __name__ == "__main__":
