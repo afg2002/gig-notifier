@@ -2844,6 +2844,35 @@ class ProjectsBot:
         self._running = False
 
 
+async def fetch_updates(token: str, offset: int = 0, timeout: int = 30) -> dict:
+    """Fetch updates via long polling using stdlib urllib."""
+    import urllib.request
+    import urllib.error
+
+    url = f"{TG_API}{token}/getUpdates"
+    payload = {
+        "offset": offset,
+        "timeout": timeout,
+        "allowed_updates": ["message", "callback_query"],
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "TelegramBot/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout + 10) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode())
+        except Exception:
+            return {"ok": False, "result": []}
+    except Exception as e:
+        logger.error(f"fetch_updates error: {e}")
+        return {"ok": False, "result": []}
+
+
 # ============================================================
 # Webhook Server
 # ============================================================
@@ -2935,9 +2964,47 @@ async def main():
         logger.info("Running with webhook + monitoring loop")
         await asyncio.gather(webhook_task, monitor_task)
     else:
-        # Polling mode (default): start_polling() handles everything
+        # Polling mode (default): monitoring loop + Telegram polling in parallel
         logger.info("Starting in POLLING mode (WEBHOOK_ENABLED=false)")
-        await bot.start_polling()
+
+        # Seed existing projects so we only notify truly new ones
+        await bot._seed_seen_projects()
+
+        # Send startup notification
+        await bot._send_startup_notification()
+
+        # Start monitoring loop in background task
+        monitor_task = asyncio.create_task(bot.monitoring_loop())
+
+        # Start Telegram long-polling loop (handles /start, /browse, etc.)
+        offset = 0
+        logger.info("Bot started. Waiting for messages...")
+
+        try:
+            while True:
+                try:
+                    result = await fetch_updates(TELEGRAM_BOT_TOKEN, offset)
+
+                    if result.get("ok") and result.get("result"):
+                        for update in result["result"]:
+                            offset = update["update_id"] + 1
+                            await bot.handle_update(update)
+                    else:
+                        await asyncio.sleep(1)
+
+                except Exception as e:
+                    logger.error(f"Update fetch error: {e}")
+                    await asyncio.sleep(5)
+
+        except KeyboardInterrupt:
+            logger.info("Bot stopped by user")
+            bot.stop()
+            monitor_task.cancel()
+        except Exception as e:
+            logger.error(f"Fatal error: {e}")
+            bot.stop()
+            monitor_task.cancel()
+            raise
 
 
 if __name__ == "__main__":
