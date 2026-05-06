@@ -799,13 +799,29 @@ def _is_published_today(published_date: str) -> bool:
 
 
 def build_main_menu_keyboard() -> dict:
-    """Build the main menu inline keyboard — source selector."""
+    """Build the main menu inline keyboard — all features organized by section."""
     return {
         "inline_keyboard": [
-            [{"text": "🌐 Projects.co.id", "callback_data": "src:projects"}],
-            [{"text": "⚡ Fastwork.id", "callback_data": "src:fastwork"}],
-            [{"text": "🎨 Sribu.com", "callback_data": "src:sribu"}],
-            [{"text": "🔙 Back", "callback_data": "menu:back"}],
+            # ── Browse Projects ──
+            [{"text": "🌐 Projects.co.id  📋", "callback_data": "src:projects"}],
+            [{"text": "⚡ Fastwork.id    ⚡", "callback_data": "src:fastwork"}],
+            [{"text": "🎨 Sribu.com     🎨", "callback_data": "src:sribu"}],
+
+            # ── AI Tools ──
+            [{"text": "📝 Generate AI Proposal", "callback_data": "menu:proposal"}],
+            [{"text": "📄 Upload CV PDF", "callback_data": "menu:uploadcv"},
+             {"text": "👁️ Lihat CV Saya", "callback_data": "menu:mycv"}],
+
+            # ── Monitoring & Stats ──
+            [{"text": "🔔 Pengaturan Monitor", "callback_data": "menu:monitor"},
+             {"text": "📊 Status Monitor", "callback_data": "menu:status"}],
+            [{"text": "🔄 Refresh Sekarang", "callback_data": "menu:refresh"},
+             {"text": "📈 Daily Digest", "callback_data": "menu:digest"}],
+            [{"text": "📉 Trend Analysis", "callback_data": "menu:trends"},
+             {"text": "🏆 Top Clients", "callback_data": "menu:topclients"}],
+
+            # ── Help ──
+            [{"text": "📖 Bantuan & Guide", "callback_data": "menu:help"}],
         ]
     }
 
@@ -817,8 +833,6 @@ def build_platform_submenu(source: str) -> dict:
             "inline_keyboard": [
                 [{"text": "📋 Browse Projects", "callback_data": "menu:browse"}],
                 [{"text": "🔔 Monitor Settings", "callback_data": "menu:monitor"}],
-                [{"text": "🔄 Refresh Now", "callback_data": "menu:refresh"}],
-                [{"text": "ℹ️ Help", "callback_data": "menu:help"}],
                 [{"text": "🔙 Back to Sources", "callback_data": "src:back"}],
             ]
         }
@@ -1182,6 +1196,9 @@ class ProjectsBot:
         self.cache = ProjectCache()
         self.fw_cache = FastworkJobCache()
         self._running = False
+        # Short-key URL cache for AI proposal from detail buttons (bypasses 64-byte callback limit)
+        self._proposal_url_cache: dict[str, str] = {}
+        self._proposal_url_counter = 0
 
     async def handle_update(self, update: dict):
         """Route incoming updates to appropriate handlers."""
@@ -1249,19 +1266,8 @@ class ProjectsBot:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
                 chat_id,
-                "👋 Gunakan command berikut:\n\n"
-                "/start — Menu utama\n"
-                "/browse — Browse project per kategori\n"
-                "/monitor — Atur monitoring kategori\n"
-                "/refresh — Refresh project terbaru\n"
-                "/status — Status monitoring\n"
-                "/digest — Ringkasan project hari ini\n"
-                "/topclients — Top 10 client terbanyak\n"
-                "/fw — Browse Fastwork jobs\n"
-                "/proposal <url> — Generate AI proposal\n"
-                "/uploadcv — Upload CV PDF\n"
-                "/mycv — Lihat status CV\n"
-                "/help — Bantuan",
+                "🤖 <b>Command tidak dikenali</b>\n\n"
+                "Gunakan menu di bawah atau ketik /help untuk bantuan.",
                 reply_markup=build_main_menu_keyboard(),
             )
 
@@ -1319,6 +1325,12 @@ class ProjectsBot:
                 await self._cb_source_select(chat_id, message_id, parts[1], callback_id)
             elif action == "sribu":
                 await self._cb_sribu(chat_id, message_id, parts[1], callback_id)
+            elif action == "proposal":
+                # proposal:projects:<key> OR proposal:fw:<key> OR proposal:sribu:<key>
+                source = parts[1]
+                cache_key = parts[2] if len(parts) > 2 else ""
+                proj_url = self._proposal_url_cache.get(cache_key, "")
+                await self._cb_ai_proposal(chat_id, message_id, source, proj_url, callback_id)
             elif action == "sribu_cat":
                 cat_id = parts[1]
                 page = int(parts[2])
@@ -1345,17 +1357,18 @@ class ProjectsBot:
             TELEGRAM_BOT_TOKEN,
             chat_id,
             "🤖 <b>Freelance Monitor Bot</b>\n\n"
-            "Pantau project freelance dari 3 sumber:\n"
+            "Selamat datang! Saya bantu Anda menemukan dan melamar project freelance.\n\n"
+            "📦 <b>3 Platform:</b>\n"
             "🌐 <b>Projects.co.id</b> — Web dev, mobile, data entry, dll\n"
             "⚡ <b>Fastwork.id</b> — Desain, UX/UI, fotografi, dll\n"
             "🎨 <b>Sribu.com</b> — Logo, branding, kemasan, desain\n\n"
-            "✨ <b>Fitur:</b>\n"
-            "• 📋 Browse project per kategori (tiap sumber)\n"
-            "• 🔔 Auto-notifikasi project baru (dengan intel)\n"
-            "• 📄 Pagination (10 project/halaman)\n"
-            "• ⚙️ Konfigurasi monitoring per kategori\n"
-            "• 🧠 Competitive intel & client reputation\n\n"
-            "Pilih sumber di bawah untuk mulai! 👇",
+            "🚀 <b>Cara Kerja:</b>\n"
+            "1️⃣ Pilih platform → Browse project → Lihat detail\n"
+            "2️⃣ Klik <b>AI Proposal</b> di halaman detail project\n"
+            "3️⃣ Salin proposal → Kirim ke client\n\n"
+            "💡 <b>Tips:</b> Upload CV dulu dengan 📄 <code>/uploadcv</code> "
+            "agar proposal lebih personal!\n\n"
+            "Pilih menu di bawah untuk mulai 👇",
             reply_markup=build_main_menu_keyboard(),
         )
 
@@ -1417,33 +1430,32 @@ class ProjectsBot:
         await send_message(
             TELEGRAM_BOT_TOKEN,
             chat_id,
-            "📖 <b>Bantuan</b>\n\n"
-            "<b>Commands:</b>\n"
+            "📖 <b>Panduan Lengkap</b>\n\n"
+            "<b>🚀 Quick Start:</b>\n"
+            "1️⃣ Pilih platform → 2️⃣ Browse project → 3️⃣ Lihat detail → 4️⃣ AI Proposal\n\n"
+            "<b>🌐 Platform Commands:</b>\n"
+            "/browse — Browse Projects.co.id per kategori\n"
+            "/fw — Browse Fastwork.id jobs\n"
+            "/sribu — Browse Sribu.com contests\n\n"
+            "<b>🔔 Monitoring Commands:</b>\n"
+            "/monitor — Atur kategori yang dipantau\n"
+            "/status — Cek status monitoring aktif\n"
+            "/refresh — Cek project baru sekarang\n"
+            "/digest — Ringkasan project hari ini\n\n"
+            "<b>📊 Analytics Commands:</b>\n"
+            "/trends — Analisis trend per kategori\n"
+            "/topclients — Top 10 client terbanyak\n\n"
+            "<b>📝 AI Proposal Commands:</b>\n"
+            "/proposal &lt;url&gt; — Generate AI proposal dari URL project\n"
+            "/uploadcv — Upload CV PDF (untuk proposal personal)\n"
+            "/mycv — Lihat CV yang sudah diupload\n\n"
+            "<b>🛠️ Other:</b>\n"
             "/start — Menu utama\n"
-            "/browse — Browse project per kategori\n"
-            "/monitor — Atur monitoring kategori\n"
-            "/refresh — Refresh & cek project baru\n"
-            "/status — Status monitoring saat ini\n"
-            "/digest — Ringkasan project hari ini\n"
-            "/trends — Analisis trend mingguan\n"
-            "/topclients — Top 10 client terbanyak\n"
-            "/proposal — Generate AI proposal\n"
-            "/uploadcv — Upload CV PDF\n"
-            "/mycv — Lihat status CV\n"
-            "/help — Bantuan ini\n\n"
-            "<b>Fitur Cerdas:</b>\n"
-            "🧠 Competitive Intel — bandingkan budget dengan rata-rata kategori\n"
-            "👤 Client Reputation — info client sebelumnya (Veteran/Regular/Known)\n"
-            "📊 Daily Digest — ringkasan harian project baru\n"
-            "📈 Trend Analysis — analytics project per kategori\n"
-            "📝 AI Proposal — generate proposal otomatis dengan CV personal\n\n"
-            "<b>Cara Pakai:</b>\n"
-            "1️⃣ /browse → Pilih kategori → Lihat project\n"
-            "2️⃣ /monitor → Toggle kategori yang mau dipantau\n"
-            "3️⃣ Bot akan auto-notifikasi kalau ada project baru (dengan intel)\n\n"
-            "<b>Config:</b>\n"
-            "Set <code>POLL_INTERVAL</code> di .env untuk ubah frekuensi polling (default: 300s)\n"
-            "Set <code>PROJECTS_PER_PAGE</code> untuk ubah jumlah project per halaman (default: 10)",
+            "/help — Panduan ini\n\n"
+            "<b>💡 Tips:</b>\n"
+            "• Upload CV dulu dengan /uploadcv agar proposal lebih personal\n"
+            "• Aktifkan monitoring dengan /monitor agar tidak ada project terlewat\n"
+            "• AI Proposal ada di setiap halaman detail project — klik tombol langsung!",
             reply_markup=build_main_menu_keyboard(),
         )
 
@@ -1856,7 +1868,7 @@ class ProjectsBot:
             await send_message(
                 TELEGRAM_BOT_TOKEN, chat_id,
                 "📭 <b>Belum Ada CV</b>\n\n"
-                "Anda belum上传 CV. Kirim file PDF dengan "
+                "Anda belum upload CV. Kirim file PDF dengan "
                 "<code>/uploadcv</code> untuk upload."
             )
 
@@ -2043,7 +2055,26 @@ class ProjectsBot:
 
         job = jobs[job_idx]
         text = format_fastwork_job_card(job, job_idx)
-        keyboard = _build_fastwork_detail_keyboard(job)
+
+        # Cache URL for AI proposal button
+        proposal_key = self._cache_proposal_url(job.link)
+
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔗 View Full Job", "url": job.link},
+                ],
+                [
+                    {
+                        "text": "📝 Generate AI Proposal",
+                        "callback_data": f"proposal:fw:{proposal_key}",
+                    }
+                ],
+                [
+                    {"text": "🔙 Back to Jobs", "callback_data": f"fwcat:{job.tag_id}:1"},
+                ],
+            ]
+        }
 
         await edit_message(
             TELEGRAM_BOT_TOKEN,
@@ -2231,7 +2262,26 @@ class ProjectsBot:
         contest = contests[contest_idx]
 
         text = format_sribu_contest_card(contest, 0)
-        keyboard = _build_sribu_detail_keyboard(contest)
+
+        # Cache URL for AI proposal button
+        proposal_key = self._cache_proposal_url(contest.contest_url)
+
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "🔗 View Contest", "url": contest.contest_url},
+                ],
+                [
+                    {
+                        "text": "📝 Generate AI Proposal",
+                        "callback_data": f"proposal:sribu:{proposal_key}",
+                    }
+                ],
+                [
+                    {"text": "🔙 Back to Contests", "callback_data": "sribu_cat:all:1"},
+                ],
+            ]
+        }
 
         await edit_message(
             TELEGRAM_BOT_TOKEN,
@@ -2319,27 +2369,92 @@ class ProjectsBot:
         elif action == "browse":
             await self._cb_category_list(chat_id, message_id, callback_id)
         elif action == "monitor":
+            status_text = format_monitor_status(self.monitor)
             await edit_message(
                 TELEGRAM_BOT_TOKEN,
                 int(chat_id),
                 message_id,
-                format_monitor_status(self.monitor),
+                status_text,
+                reply_markup=build_monitor_keyboard(self.monitor),
+            )
+        elif action == "status":
+            status_text = format_monitor_status(self.monitor)
+            await edit_message(
+                TELEGRAM_BOT_TOKEN,
+                int(chat_id),
+                message_id,
+                status_text,
                 reply_markup=build_monitor_keyboard(self.monitor),
             )
         elif action == "refresh":
             await self._cmd_refresh(chat_id)
-        elif action == "help":
+        elif action == "digest":
+            await self._cmd_digest(chat_id)
+        elif action == "trends":
+            await self._cmd_trends(chat_id)
+        elif action == "topclients":
+            await self._cmd_top_clients(chat_id)
+        elif action == "proposal":
             await edit_message(
                 TELEGRAM_BOT_TOKEN,
                 int(chat_id),
                 message_id,
-                "📖 <b>Bantuan</b>\n\n"
-                "/browse — Browse project per kategori\n"
-                "/monitor — Atur monitoring\n"
-                "/refresh — Cek project baru\n"
-                "/status — Status monitoring",
+                "📝 <b>Generate AI Proposal</b>\n\n"
+                "Ada 2 cara untuk generate proposal:\n\n"
+                "1️⃣ <b>Dari daftar project:</b>\n"
+                "Buka project → Klik tombol <b>📝 Generate AI Proposal</b>\n\n"
+                "2️⃣ <b>Dari URL:</b>\n"
+                "Ketik: <code>/proposal [URL_project]</code>\n\n"
+                "Contoh:\n"
+                "<code>/proposal https://projects.co.id/view/abc123/project-title</code>\n\n"
+                "Platform supported:\n"
+                "• projects.co.id\n"
+                "• fastwork.id\n"
+                "• sribu.com",
                 reply_markup=build_main_menu_keyboard(),
             )
+        elif action == "uploadcv":
+            await edit_message(
+                TELEGRAM_BOT_TOKEN,
+                int(chat_id),
+                message_id,
+                "📄 <b>Upload CV PDF</b>\n\n"
+                "Kirim file PDF CV Anda sebagai document (bukan foto).\n\n"
+                "Cara:\n"
+                "1. Klik ikon lampiran (📎) di chat\n"
+                "2. Pilih 'Document'\n"
+                "3. Pilih file PDF CV Anda\n\n"
+                "CV akan disimpan secara private dan digunakan "
+                "untuk membuat proposal yang lebih personal.",
+                reply_markup=build_main_menu_keyboard(),
+            )
+        elif action == "mycv":
+            cv_text = get_user_cv_text(chat_id)
+            if cv_text:
+                preview = cv_text[:300] + "..." if len(cv_text) > 300 else cv_text
+                await edit_message(
+                    TELEGRAM_BOT_TOKEN,
+                    int(chat_id),
+                    message_id,
+                    f"✅ <b>CV Tersimpan</b>\n\n"
+                    f"Panjang: {len(cv_text)} karakter\n\n"
+                    f"Preview:\n"
+                    f"<code>{preview}</code>\n\n"
+                    "CV ini akan digunakan untuk generate proposal personal.",
+                    reply_markup=build_main_menu_keyboard(),
+                )
+            else:
+                await edit_message(
+                    TELEGRAM_BOT_TOKEN,
+                    int(chat_id),
+                    message_id,
+                    "📭 <b>Belum Ada CV</b>\n\n"
+                    "Anda belum upload CV. Kirim file PDF dengan "
+                    "<code>/uploadcv</code> untuk upload.",
+                    reply_markup=build_main_menu_keyboard(),
+                )
+        elif action == "help":
+            await self._cmd_help_text(chat_id)
 
     async def _cb_category(
         self, chat_id: str, message_id: int, category_id: str, callback_id: str
@@ -2503,6 +2618,12 @@ class ProjectsBot:
         """Build keyboard with pagination and project detail buttons."""
         buttons = []
 
+        # Action buttons row (Browse + Monitor)
+        buttons.append([
+            {"text": "📂 Kategori Lain", "callback_data": "catlist"},
+            {"text": "🔔 Monitor", "callback_data": "menu:monitor"},
+        ])
+
         # Project detail buttons — use absolute index for cache lookup
         abs_start = (page - 1) * PROJECTS_PER_PAGE
         for i, p in enumerate(projects):
@@ -2530,7 +2651,7 @@ class ProjectsBot:
             )
         buttons.append(nav_row)
 
-        buttons.append([{"text": "📂 Categories", "callback_data": "catlist"}])
+        buttons.append([{"text": "📂 Browse Kategori", "callback_data": "catlist"}])
         buttons.append([{"text": "🏠 Main Menu", "callback_data": "menu:back"}])
 
         return {"inline_keyboard": buttons}
@@ -2595,13 +2716,22 @@ class ProjectsBot:
         project = all_projects[abs_index]
         text = format_project_card(project, abs_index)
 
-        # Keyboard with View Project button
+        # Cache URL for AI proposal button
+        proposal_key = self._cache_proposal_url(project.link)
+
+        # Keyboard with View Project + AI Proposal
         kb = {
             "inline_keyboard": [
                 [
                     {
                         "text": "🔗 View Project",
                         "url": project.link,
+                    }
+                ],
+                [
+                    {
+                        "text": "📝 Generate AI Proposal",
+                        "callback_data": f"proposal:projects:{proposal_key}",
                     }
                 ],
                 [
@@ -2617,6 +2747,108 @@ class ProjectsBot:
         await edit_message(
             TELEGRAM_BOT_TOKEN, int(chat_id), message_id, text, reply_markup=kb
         )
+
+    # ── Proposal URL Cache Helpers ─────────────────────────────────────────────
+
+    def _cache_proposal_url(self, url: str) -> str:
+        """Store a project URL and return a short cache key for AI proposal."""
+        self._proposal_url_counter += 1
+        key = str(self._proposal_url_counter)
+        self._proposal_url_cache[key] = url
+        # Keep cache bounded
+        if len(self._proposal_url_cache) > 100:
+            oldest = next(iter(self._proposal_url_cache))
+            del self._proposal_url_cache[oldest]
+        return key
+
+    async def _cb_ai_proposal(
+        self, chat_id: str, message_id: int, source: str,
+        proj_url: str, callback_id: str
+    ):
+        """Handle AI Proposal button from any project detail view."""
+        await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
+
+        if not proj_url:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "❌ <b>Link project tidak ditemukan</b>\n\n"
+                "Coba buka detail project lagi dari daftar."
+            )
+            return
+
+        # Show typing + loading
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            f"📝 <b>Generating AI Proposal...</b>\n\n"
+            f"🌐 {proj_url}\n\n"
+            "Mohon tunggu sebentar, AI sedang membuat proposal..."
+        )
+
+        # Check rate limit
+        allowed, remaining = _check_rate_limit(chat_id)
+        if not allowed:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                f"⏳ <b>Batas proposal harian tercapai</b>\n\n"
+                f"Sisa: 0/5. Coba lagi besok!"
+            )
+            return
+
+        try:
+            cv_text = get_user_cv_text(chat_id)
+            loop = asyncio.get_event_loop()
+
+            # Scrape project detail in executor
+            detail = await loop.run_in_executor(None, scrape_project_detail, proj_url)
+
+            if detail:
+                project_title = detail.title
+                project_budget = detail.budget
+                project_description = detail.description
+                client_name = detail.client_name
+                display_source = detail.source
+            else:
+                project_title = "Project"
+                project_budget = "-"
+                project_description = "Project freelance"
+                client_name = "Client"
+                display_source = source
+
+            # Generate proposal
+            proposal, was_cached = await generate_proposal(
+                project_title=project_title,
+                project_budget=project_budget,
+                project_description=project_description,
+                client_name=client_name,
+                project_url=proj_url,
+                cv_text=cv_text,
+            )
+            _increment_proposal_count(chat_id)
+
+            display = format_proposal_for_display(proposal, project_title, display_source)
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, display)
+
+            if cv_text:
+                await send_message(
+                    TELEGRAM_BOT_TOKEN, chat_id,
+                    f"✅ Proposal {'' if was_cached else 'di-generate '}dengan CV Anda.\n"
+                    f"Sisa proposal: {remaining - 1}/5"
+                )
+            else:
+                await send_message(
+                    TELEGRAM_BOT_TOKEN, chat_id,
+                    f"💡 <b>Tips:</b> Upload CV dengan <code>/uploadcv</code> "
+                    f"untuk proposal lebih personal.\n"
+                    f"Sisa proposal: {remaining - 1}/5"
+                )
+
+        except Exception as e:
+            logger.error(f"AI Proposal error: {e}")
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "❌ <b>Gagal generate proposal</b>\n\n"
+                "Coba lagi nanti."
+            )
 
     async def _cb_monitor_toggle(
         self, chat_id: str, message_id: int, category_id: str, callback_id: str
