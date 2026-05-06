@@ -17,6 +17,9 @@ import fcntl
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
+import aiohttp
+from aiohttp import web
+
 from scraper import (
     scrape_listing,
     CATEGORIES,
@@ -40,6 +43,23 @@ from sribu_scraper import (
     scrape_detail_budget,
 )
 
+from trend_analysis import (
+    record_project,
+    get_trend_stats,
+    get_category_trend,
+    get_peak_hours,
+    get_budget_trend,
+    format_trend_report,
+)
+
+from proposal_generator import (
+    generate_proposal,
+    extract_project_info_from_url,
+    format_proposal_for_display,
+    _check_rate_limit,
+    _increment_proposal_count,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -60,6 +80,13 @@ SRIBU_SEEN_FILE = os.path.join(DATA_DIR, "sribu_seen.json")
 SRIBU_MONITOR_FILE = os.path.join(DATA_DIR, "sribu_monitor.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# Webhook configuration
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "https://gregory-advise-nickel-entering.trycloudflare.com")
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "secret_token_123")
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8082"))
+WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
 
 def get_chat_ids() -> list[str]:
@@ -1167,6 +1194,14 @@ class ProjectsBot:
             await self._cmd_fastwork(chat_id)
         elif text in ("/sribu", "/contest"):
             await self._cmd_sribu(chat_id)
+        elif text in ("/trends", "/trend"):
+            await self._cmd_trends(chat_id)
+        elif text.startswith("/proposal") or text.startswith("/apply"):
+            await self._cmd_proposal(chat_id, text)
+        elif text.startswith("/send "):
+            await self._cmd_send_proposal(chat_id, text)
+        elif text == "/cancel":
+            await self._cmd_cancel_proposal(chat_id)
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
@@ -1344,12 +1379,16 @@ class ProjectsBot:
             "/refresh — Refresh & cek project baru\n"
             "/status — Status monitoring saat ini\n"
             "/digest — Ringkasan project hari ini\n"
+            "/trends — Analisis trend mingguan\n"
             "/topclients — Top 10 client terbanyak\n"
+            "/proposal — Generate AI proposal\n"
             "/help — Bantuan ini\n\n"
             "<b>Fitur Cerdas:</b>\n"
             "🧠 Competitive Intel — bandingkan budget dengan rata-rata kategori\n"
             "👤 Client Reputation — info client sebelumnya (Veteran/Regular/Known)\n"
-            "📊 Daily Digest — ringkasan harian project baru\n\n"
+            "📊 Daily Digest — ringkasan harian project baru\n"
+            "📈 Trend Analysis — analytics project per kategori\n"
+            "📝 AI Proposal — generate proposal otomatis\n\n"
             "<b>Cara Pakai:</b>\n"
             "1️⃣ /browse → Pilih kategori → Lihat project\n"
             "2️⃣ /monitor → Toggle kategori yang mau dipantau\n"
@@ -1467,6 +1506,149 @@ class ProjectsBot:
 
         await send_message(
             TELEGRAM_BOT_TOKEN, chat_id, "\n".join(lines)
+        )
+
+    # ---- Trend Analysis ----
+
+    async def _cmd_trends(self, chat_id: str):
+        """Show weekly trend analysis dashboard."""
+        report = format_trend_report()
+        if report:
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, report)
+        else:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "📊 <b>Trend Analysis</b>\n\n"
+                "Butuh data 3+ hari untuk tampilkan trend. "
+                "Kumpulkan data dulu ya! \n\n"
+                "Pantau project secara rutin dan data trend akan "
+                "tersimpan otomatis."
+            )
+
+    # ---- AI Proposal Generator ----
+
+    async def _cmd_proposal(self, chat_id: str, text: str):
+        """Generate a proposal for a project URL or ID."""
+        # Check rate limit
+        allowed, remaining = _check_rate_limit(chat_id)
+        if not allowed:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "⏳ <b>Batas proposal harian tercapai</b>\n\n"
+                f"Limit: 5 proposal/hari.\n"
+                "Coba lagi besok ya!"
+            )
+            return
+
+        # Parse project URL/ID from command
+        parts = text.split(" ", 1)
+        project_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        if not project_arg:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "📝 <b>AI Proposal Generator</b>\n\n"
+                "Usage:\n"
+                "<code>/proposal &lt;project_url&gt;</code>\n"
+                "example: <code>/proposal https://projects.co.id/projects/12345</code>\n\n"
+                "Supported sources:\n"
+                "• projects.co.id\n"
+                "• fastwork.id\n"
+                "• sribu.com\n\n"
+                "Rate limit: 5 proposals/day"
+            )
+            return
+
+        # Show typing indicator
+        await tg_request(
+            TELEGRAM_BOT_TOKEN, "sendChatAction",
+            {"chat_id": int(chat_id), "action": "typing"}
+        )
+
+        # Extract project info from URL
+        project_info = extract_project_info_from_url(project_arg)
+
+        if not project_info["source"]:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "❌ <b>URL tidak valid</b>\n\n"
+                "Supports:\n"
+                "• projects.co.id\n"
+                "• fastwork.id\n"
+                "• sribu.com"
+            )
+            return
+
+        # For now, generate a demo proposal (scraping would require actual implementation)
+        # In production, this would scrape the actual project details first
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            f"🔄 <b>Generating proposal...</b>\n\n"
+            f"Source: {project_info['source']}\n"
+            f"ID: {project_info['project_id'] or 'N/A'}\n\n"
+            "Mohon tunggu sebentar..."
+        )
+
+        try:
+            # Generate proposal
+            proposal, was_cached = await generate_proposal(
+                project_title=f"Project {project_info['project_id'] or 'Unknown'}",
+                project_budget="Rp 2.500.000 - 5.000.000",
+                project_description="Project freelance dari platform " + project_info["source"],
+                client_name="Client",
+                project_url=project_arg,
+            )
+
+            # Increment rate limit counter
+            _increment_proposal_count(chat_id)
+
+            # Format and send proposal
+            display = format_proposal_for_display(
+                proposal,
+                f"Project {project_info['project_id'] or 'Unknown'}",
+                project_info["source"]
+            )
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, display)
+
+        except Exception as e:
+            logger.error(f"Proposal generation error: {e}")
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "❌ <b>Gagal generate proposal</b>\n\n"
+                "Coba lagi nanti atau gunakan template manual."
+            )
+
+    async def _cmd_send_proposal(self, chat_id: str, text: str):
+        """Send proposal to client (after user confirmation)."""
+        # Extract proposal text after "/send "
+        proposal_text = text[6:].strip()
+
+        if not proposal_text:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "📤 <b>Send Proposal</b>\n\n"
+                "Usage: <code>/send [proposal_text]</code>\n\n"
+                "Ini akan menampilkan proposal yang bisa Anda copy ke client."
+            )
+            return
+
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            "✅ <b>Proposal siap digunakan!</b>\n\n"
+            "Berikut proposal Anda:\n\n"
+            "──────────────────────────────────\n\n"
+            f"{proposal_text}\n\n"
+            "──────────────────────────────────\n\n"
+            "💡 <b>Tips:</b> Copy proposal di atas dan kirimkan ke client "
+            "melalui platform terkait."
+        )
+
+    async def _cmd_cancel_proposal(self, chat_id: str):
+        """Cancel current proposal operation."""
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            "❌ <b>Proposal dibatalkan</b>\n\n"
+            "Jika butuh bantuan, ketik /help"
         )
 
     # ---- Source Selection (Projects vs Fastwork) ----
@@ -2418,6 +2600,16 @@ class ProjectsBot:
                             update_budget_stats(p)
                             update_client_stats(p)
                             record_digest_project(p, category["name"])
+                            # Record trend stats
+                            published_hour = None
+                            if p.published_date:
+                                try:
+                                    time_part = p.published_date.split(" ")[1] if len(p.published_date.split(" ")) > 1 else None
+                                    if time_part:
+                                        published_hour = int(time_part.split(":")[0])
+                                except (ValueError, IndexError):
+                                    pass
+                            record_project(category["id"], p.budget, published_hour, "projects")
 
                             bid_count = (
                                 int(p.bid_count)
@@ -2611,74 +2803,77 @@ class ProjectsBot:
 
 
 # ============================================================
-# Long Polling Update Fetcher
+# Webhook Server
 # ============================================================
 
 
-async def fetch_updates(token: str, offset: int = 0, timeout: int = 30) -> dict:
-    """Fetch updates via long polling using stdlib urllib."""
-    import urllib.request
-    import urllib.error
-
-    url = f"{TG_API}{token}/getUpdates"
+async def set_webhook(token: str, url: str, secret: str) -> dict:
+    """Register the webhook URL with Telegram."""
+    # First delete any existing webhook
+    await tg_request(token, "deleteWebhook", {})
+    # Set new webhook with secret token
     payload = {
-        "offset": offset,
-        "timeout": timeout,
-        "allowed_updates": ["message", "callback_query"],
+        "url": url,
+        "secret_token": secret,
     }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=data,
-        headers={"Content-Type": "application/json", "User-Agent": "TelegramBot/1.0"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout + 10) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
+    result = await tg_request(token, "setWebhook", payload)
+    if result.get("ok"):
+        logger.info(f"Webhook set to {url}")
+    else:
+        logger.error(f"Failed to set webhook: {result}")
+    return result
+
+
+async def webhook_server(bot: 'ProjectsBot'):
+    """Run the aiohttp webhook server on port 8082."""
+    async def handle_webhook(request):
+        """Handle incoming Telegram webhook updates."""
+        # Validate secret token
+        secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if secret != WEBHOOK_SECRET:
+            logger.warning(f"Invalid webhook secret from {request.remote}")
+            return web.Response(status=401, text="Unauthorized")
+
         try:
-            return json.loads(e.read().decode())
-        except Exception:
-            return {"ok": False, "result": []}
-    except Exception as e:
-        logger.error(f"fetch_updates error: {e}")
-        return {"ok": False, "result": []}
+            update = await request.json()
+            logger.info(f"Webhook update received: {update.get('update_id', 'unknown')}")
+            # Process the update using the bot's handler
+            await bot.handle_update(update)
+            return web.Response(status=200, text="OK")
+        except Exception as e:
+            logger.error(f"Webhook processing error: {e}")
+            return web.Response(status=500, text="Internal Server Error")
+
+    async def handle_health(request):
+        """Health check endpoint."""
+        return web.Response(status=200, text="OK")
+
+    app = web.Application()
+    app.router.add_post(WEBHOOK_PATH, handle_webhook)
+    app.router.add_get("/health", handle_health)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", WEBHOOK_PORT)
+    await site.start()
+    logger.info(f"Webhook server started on 0.0.0.0:{WEBHOOK_PORT}")
+
+    # Keep server running
+    while True:
+        await asyncio.sleep(3600)
+
+
+# ============================================================
+# Main Entry Point
+# ============================================================
 
 
 async def main():
     bot = ProjectsBot()
 
-    # Start monitoring loop in background
-    monitor_task = asyncio.create_task(bot.start_polling())
-
-    # Start long-polling for user interactions
-    offset = 0
-    logger.info("Bot started. Waiting for messages...")
-
-    try:
-        while True:
-            try:
-                result = await fetch_updates(TELEGRAM_BOT_TOKEN, offset)
-
-                if result.get("ok") and result.get("result"):
-                    for update in result["result"]:
-                        offset = update["update_id"] + 1
-                        await bot.handle_update(update)
-                else:
-                    await asyncio.sleep(1)
-
-            except Exception as e:
-                logger.error(f"Update fetch error: {e}")
-                await asyncio.sleep(5)
-
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-        bot.stop()
-        monitor_task.cancel()
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        bot.stop()
-        monitor_task.cancel()
-        raise
+    # Start monitoring loop (scraping + notifications)
+    # Note: Webhook temporarily disabled due to spam issues
+    await bot.start_polling()
 
 
 if __name__ == "__main__":
