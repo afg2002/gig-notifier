@@ -25,6 +25,8 @@ from scraper import (
     CATEGORIES,
     get_category_by_id,
     Project,
+    scrape_project_detail,
+    ProjectDetail,
 )
 
 from fastwork_scraper import (
@@ -58,6 +60,9 @@ from proposal_generator import (
     format_proposal_for_display,
     _check_rate_limit,
     _increment_proposal_count,
+    get_user_cv_text,
+    save_user_cv,
+    extract_text_from_pdf,
 )
 
 logging.basicConfig(
@@ -1191,8 +1196,25 @@ class ProjectsBot:
             return
 
     async def _handle_message(self, message: dict):
-        """Handle regular text messages."""
+        """Handle regular text messages and document uploads."""
         chat_id = str(message["chat"]["id"])
+
+        # Handle document upload (CV PDF)
+        if "document" in message:
+            doc = message["document"]
+            file_name = doc.get("file_name", "")
+            mime_type = doc.get("mime_type", "")
+
+            if mime_type == "application/pdf" or file_name.lower().endswith(".pdf"):
+                await self._handle_cv_upload(chat_id, doc)
+            else:
+                await send_message(
+                    TELEGRAM_BOT_TOKEN, chat_id,
+                    "❌ File bukan PDF. Silakan upload file berekstensi .pdf"
+                )
+            return
+
+        # Handle text messages
         text = message.get("text", "").strip()
 
         if text == "/start":
@@ -1219,10 +1241,10 @@ class ProjectsBot:
             await self._cmd_trends(chat_id)
         elif text.startswith("/proposal") or text.startswith("/apply"):
             await self._cmd_proposal(chat_id, text)
-        elif text.startswith("/send "):
-            await self._cmd_send_proposal(chat_id, text)
-        elif text == "/cancel":
-            await self._cmd_cancel_proposal(chat_id)
+        elif text.startswith("/uploadcv"):
+            await self._cmd_upload_cv(chat_id, text)
+        elif text.startswith("/mycv"):
+            await self._cmd_my_cv(chat_id)
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
@@ -1236,6 +1258,9 @@ class ProjectsBot:
                 "/digest — Ringkasan project hari ini\n"
                 "/topclients — Top 10 client terbanyak\n"
                 "/fw — Browse Fastwork jobs\n"
+                "/proposal <url> — Generate AI proposal\n"
+                "/uploadcv — Upload CV PDF\n"
+                "/mycv — Lihat status CV\n"
                 "/help — Bantuan",
                 reply_markup=build_main_menu_keyboard(),
             )
@@ -1307,62 +1332,11 @@ class ProjectsBot:
                 cat_id = parts[1]
                 self.sribu_monitor.toggle(cat_id)
                 await self._sribu_monitor(chat_id, message_id, callback_id)
-            elif action == "proposal":
-                sub_action = parts[1]
-                if sub_action == "send":
-                    await self._cb_proposal_send(chat_id, message_id, ":".join(parts[2:]), callback_id)
-                elif sub_action == "edit":
-                    await self._cb_proposal_edit(chat_id, message_id, callback_id)
-                elif sub_action == "cancel":
-                    await self._cb_proposal_cancel(chat_id, message_id, callback_id)
         except Exception as e:
             logger.error(f"Callback handler error: {e}")
             await answer_callback(
                 TELEGRAM_BOT_TOKEN, callback_id, text="⚠️ Terjadi error, coba lagi."
             )
-
-    # ---- Proposal Callback Handlers ----
-
-    async def _cb_proposal_send(self, chat_id: str, message_id: int, source: str, callback_id: str):
-        """Handle proposal send button - instructs user to copy and send manually."""
-        await answer_callback(
-            TELEGRAM_BOT_TOKEN, callback_id,
-            text="📤 Untuk mengirim proposal, salin teks proposal dan kirim ke client via email atau form di platform."
-        )
-        await send_message(
-            TELEGRAM_BOT_TOKEN, chat_id,
-            "📤 <b>Mengirim Proposal</b>\n\n"
-            "Untuk saat ini, silakan salin proposal di atas dan kirimkan ke client via:\n"
-            "• Email client\n"
-            "• Form submission di platform\n"
-            "• Chat langsung\n\n"
-            "Fitur kirim langsung via API akan segera hadir!"
-        )
-
-    async def _cb_proposal_edit(self, chat_id: str, message_id: int, callback_id: str):
-        """Handle proposal edit button."""
-        await answer_callback(
-            TELEGRAM_BOT_TOKEN, callback_id,
-            text="✏️ Ketik /proposal <url> untuk generate proposal baru."
-        )
-        await send_message(
-            TELEGRAM_BOT_TOKEN, chat_id,
-            "✏️ <b>Edit Proposal</b>\n\n"
-            "Ketik <code>/proposal [project_url]</code> untuk generate proposal baru.\n"
-            "Setiap proposal di-generate unik berdasarkan project."
-        )
-
-    async def _cb_proposal_cancel(self, chat_id: str, message_id: int, callback_id: str):
-        """Handle proposal cancel button."""
-        await answer_callback(
-            TELEGRAM_BOT_TOKEN, callback_id,
-            text="❌ Proposal dibatalkan."
-        )
-        await send_message(
-            TELEGRAM_BOT_TOKEN, chat_id,
-            "❌ <b>Proposal Dibatalkan</b>\n\n"
-            "Gunakan /browse untuk melihat project lain."
-        )
 
     # ---- Command Handlers ----
 
@@ -1454,13 +1428,15 @@ class ProjectsBot:
             "/trends — Analisis trend mingguan\n"
             "/topclients — Top 10 client terbanyak\n"
             "/proposal — Generate AI proposal\n"
+            "/uploadcv — Upload CV PDF\n"
+            "/mycv — Lihat status CV\n"
             "/help — Bantuan ini\n\n"
             "<b>Fitur Cerdas:</b>\n"
             "🧠 Competitive Intel — bandingkan budget dengan rata-rata kategori\n"
             "👤 Client Reputation — info client sebelumnya (Veteran/Regular/Known)\n"
             "📊 Daily Digest — ringkasan harian project baru\n"
             "📈 Trend Analysis — analytics project per kategori\n"
-            "📝 AI Proposal — generate proposal otomatis\n\n"
+            "📝 AI Proposal — generate proposal otomatis dengan CV personal\n\n"
             "<b>Cara Pakai:</b>\n"
             "1️⃣ /browse → Pilih kategori → Lihat project\n"
             "2️⃣ /monitor → Toggle kategori yang mau dipantau\n"
@@ -1600,19 +1576,17 @@ class ProjectsBot:
     # ---- AI Proposal Generator ----
 
     async def _cmd_proposal(self, chat_id: str, text: str):
-        """Generate a proposal for a project URL or ID."""
-        # Check rate limit
+        """Generate a proposal for a project URL using real scraped data + CV context."""
         allowed, remaining = _check_rate_limit(chat_id)
         if not allowed:
             await send_message(
                 TELEGRAM_BOT_TOKEN, chat_id,
                 "⏳ <b>Batas proposal harian tercapai</b>\n\n"
-                f"Limit: 5 proposal/hari.\n"
-                "Coba lagi besok ya!"
+                f"Sisa: {remaining}/5 proposal hari ini.\n"
+                "Coba lagi besok!"
             )
             return
 
-        # Parse project URL/ID from command
         parts = text.split(" ", 1)
         project_arg = parts[1].strip() if len(parts) > 1 else ""
 
@@ -1621,13 +1595,14 @@ class ProjectsBot:
                 TELEGRAM_BOT_TOKEN, chat_id,
                 "📝 <b>AI Proposal Generator</b>\n\n"
                 "Usage:\n"
-                "<code>/proposal &lt;project_url&gt;</code>\n"
-                "example: <code>/proposal https://projects.co.id/projects/12345</code>\n\n"
-                "Supported sources:\n"
+                "<code>/proposal &lt;project_url&gt;</code>\n\n"
+                "Contoh:\n"
+                "<code>/proposal https://projects.co.id/view/abc123/project-title</code>\n\n"
+                "Platform supported:\n"
                 "• projects.co.id\n"
                 "• fastwork.id\n"
                 "• sribu.com\n\n"
-                "Rate limit: 5 proposals/day"
+                f"Sisa proposal hari ini: {remaining}/5"
             )
             return
 
@@ -1644,50 +1619,95 @@ class ProjectsBot:
             await send_message(
                 TELEGRAM_BOT_TOKEN, chat_id,
                 "❌ <b>URL tidak valid</b>\n\n"
-                "Supports:\n"
+                "Platform supported:\n"
                 "• projects.co.id\n"
                 "• fastwork.id\n"
                 "• sribu.com"
             )
             return
 
-        # For now, generate a demo proposal (scraping would require actual implementation)
-        # In production, this would scrape the actual project details first
+        # Scrape real project details
         await send_message(
             TELEGRAM_BOT_TOKEN, chat_id,
-            f"🔄 <b>Generating proposal...</b>\n\n"
-            f"Source: {project_info['source']}\n"
-            f"ID: {project_info['project_id'] or 'N/A'}\n\n"
+            f"🔍 <b>Mengambil detail project...</b>\n\n"
+            f"🌐 {project_info['source']}\n"
+            f"🔗 {project_arg}\n\n"
             "Mohon tunggu sebentar..."
         )
 
+        # Scrape actual project data
+        detail: ProjectDetail | None = None
         try:
-            # Generate proposal
-            proposal, was_cached = await generate_proposal(
-                project_title=f"Project {project_info['project_id'] or 'Unknown'}",
-                project_budget="Rp 2.500.000 - 5.000.000",
-                project_description="Project freelance dari platform " + project_info["source"],
-                client_name="Client",
-                project_url=project_arg,
+            loop = asyncio.get_event_loop()
+            detail = await loop.run_in_executor(
+                None, scrape_project_detail, project_arg
             )
+        except Exception as e:
+            logger.error(f"Project scrape error: {e}")
 
-            # Increment rate limit counter
+        # Use real data or fall back to partial info
+        if detail:
+            project_title = detail.title
+            project_budget = detail.budget
+            project_description = detail.description
+            client_name = detail.client_name
+            display_source = detail.source
+        else:
+            pid = project_info["project_id"] or "Unknown"
+            project_title = f"Project {pid}"
+            project_budget = "-"
+            project_description = "Project freelance"
+            client_name = "Client"
+            display_source = project_info["source"]
+
+        # Get user's CV if uploaded
+        cv_text = get_user_cv_text(chat_id)
+
+        # Update typing
+        await tg_request(
+            TELEGRAM_BOT_TOKEN, "sendChatAction",
+            {"chat_id": int(chat_id), "action": "typing"}
+        )
+
+        try:
+            proposal, was_cached = await generate_proposal(
+                project_title=project_title,
+                project_budget=project_budget,
+                project_description=project_description,
+                client_name=client_name,
+                project_url=project_arg,
+                cv_text=cv_text,
+            )
             _increment_proposal_count(chat_id)
 
-            # Format and send proposal with inline keyboard
-            display, reply_markup = format_proposal_for_display(
+            # Format clean copyable proposal (no buttons)
+            display = format_proposal_for_display(
                 proposal,
-                f"Project {project_info['project_id'] or 'Unknown'}",
-                project_info["source"]
+                project_title,
+                display_source,
             )
-            await send_message(TELEGRAM_BOT_TOKEN, chat_id, display, reply_markup=reply_markup)
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, display)
+
+            if cv_text:
+                await send_message(
+                    TELEGRAM_BOT_TOKEN, chat_id,
+                    f"✅ Proposal {'' if was_cached else 'di-generate '}dengan CV Anda.\n"
+                    f"Sisa proposal hari ini: {remaining - 1}/5"
+                )
+            else:
+                await send_message(
+                    TELEGRAM_BOT_TOKEN, chat_id,
+                    f"💡 <b>Tips:</b> Upload CV dulu dengan <code>/uploadcv</code> "
+                    f"untuk proposal yang lebih personal.\n"
+                    f"Sisa proposal: {remaining - 1}/5"
+                )
 
         except Exception as e:
             logger.error(f"Proposal generation error: {e}")
             await send_message(
                 TELEGRAM_BOT_TOKEN, chat_id,
                 "❌ <b>Gagal generate proposal</b>\n\n"
-                "Coba lagi nanti atau gunakan template manual."
+                "Coba lagi nanti."
             )
 
     async def _cmd_send_proposal(self, chat_id: str, text: str):
@@ -1722,6 +1742,123 @@ class ProjectsBot:
             "❌ <b>Proposal dibatalkan</b>\n\n"
             "Jika butuh bantuan, ketik /help"
         )
+
+    # ---- CV Upload ----
+
+    async def _cmd_upload_cv(self, chat_id: str, text: str):
+        """Handle /uploadcv command - instruct user to send PDF."""
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            "📄 <b>Upload CV PDF</b>\n\n"
+            "Kirim file PDF CV Anda sebagai document (bukan foto).\n\n"
+            "Cara:\n"
+            "1. Klik ikon lampiran (📎) di chat\n"
+            "2. Pilih 'Document'\n"
+            "3. Pilih file PDF CV Anda\n\n"
+            "CV akan disimpan secara private dan digunakan "
+            "untuk membuat proposal yang lebih personal.\n\n"
+            "Supported: PDF only"
+        )
+
+    async def _handle_cv_upload(self, chat_id: str, doc: dict):
+        """Download PDF, extract text, and save as user's CV."""
+        file_id = doc.get("file_id")
+        file_name = doc.get("file_name", "cv.pdf")
+
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            f"📥 <b>Mendownload CV...</b>\n\n"
+            f"File: {file_name}"
+        )
+
+        try:
+            # Get file path from Telegram
+            from urllib.request import urlopen
+            import json as _json
+
+            # Get file info
+            file_info_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile?file_id={file_id}"
+            with urlopen(file_info_url, timeout=10) as resp:
+                file_info = _json.loads(resp.read())
+
+            if not file_info.get("ok"):
+                raise Exception("Failed to get file info")
+
+            file_path = file_info["result"]["file_path"]
+
+            # Download file
+            file_url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+
+            # Download to temp file
+            import tempfile
+            temp_path = os.path.join(tempfile.gettempdir(), f"cv_{chat_id}.pdf")
+
+            with urlopen(file_url, timeout=30) as resp:
+                with open(temp_path, "wb") as f:
+                    f.write(resp.read())
+
+            # Extract text from PDF
+            cv_text = extract_text_from_pdf(temp_path)
+
+            # Clean up temp file
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+            if not cv_text or len(cv_text.strip()) < 20:
+                await send_message(
+                    TELEGRAM_BOT_TOKEN, chat_id,
+                    "⚠️ <b>PDF tidak bisa dibaca</b>\n\n"
+                    "Tidak ada teks yang bisa dibaca dari file ini. "
+                    "Pastikan CV Anda adalah file PDF text-based, bukan scanned image."
+                )
+                return
+
+            # Save CV text
+            saved_text = save_user_cv(chat_id, cv_text.strip())
+
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                f"✅ <b>CV Berhasil Disimpan!</b>\n\n"
+                f"File: {file_name}\n"
+                f"Text length: {len(saved_text)} karakter\n\n"
+                f"Preview:\n"
+                f"<code>{saved_text[:200]}...</code>\n\n"
+                "Sekarang pakai <code>/proposal &lt;url&gt;</code> untuk "
+                "generate proposal personal menggunakan CV Anda!"
+            )
+
+        except Exception as e:
+            logger.error(f"CV upload error: {e}")
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "❌ <b>Gagal upload CV</b>\n\n"
+                f"Error: {str(e)[:100]}\n\n"
+                "Coba lagi atau gunakan format PDF lain."
+            )
+
+    async def _cmd_my_cv(self, chat_id: str):
+        """Handle /mycv - show CV status."""
+        cv_text = get_user_cv_text(chat_id)
+        if cv_text:
+            preview = cv_text[:300] + "..." if len(cv_text) > 300 else cv_text
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                f"✅ <b>CV Tersimpan</b>\n\n"
+                f"Panjang: {len(cv_text)} karakter\n\n"
+                f"Preview:\n"
+                f"<code>{preview}</code>\n\n"
+                "CV ini akan digunakan untuk generate proposal personal.\n"
+                "Kirim file baru dengan <code>/uploadcv</code> untuk update."
+            )
+        else:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "📭 <b>Belum Ada CV</b>\n\n"
+                "Anda belum上传 CV. Kirim file PDF dengan "
+                "<code>/uploadcv</code> untuk upload."
+            )
 
     # ---- Source Selection (Projects vs Fastwork) ----
 

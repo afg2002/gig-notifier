@@ -1,6 +1,7 @@
 """
 AI Proposal Generator for gig-notifier bot.
 Generates professional freelance proposals using LLM (OpenRouter) or template fallback.
+Supports per-user CV storage for personalized proposals.
 """
 
 import os
@@ -18,11 +19,18 @@ logger = logging.getLogger(__name__)
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 PROPOSAL_CACHE_FILE = os.path.join(DATA_DIR, "proposal_cache.json")
 PROPOSAL_RATE_FILE = os.path.join(DATA_DIR, "proposal_rate.json")
+USER_CV_FILE = os.path.join(DATA_DIR, "user_cvs.json")  # {chat_id: {text, uploaded_at}}
 MAX_PROPOSALS_PER_DAY = 5
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_MODEL = "qwen/qwen3-next-80b-a3b-instruct:free"  # Free tier
+OPENROUTER_MODEL = os.environ.get(
+    "OPENROUTER_MODEL",
+    "google/gemma-4-26b-a4b-it:free"
+)
+
+# Ensure data directory exists
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # ── Freelancer Profile ────────────────────────────────────────────────────────
 
@@ -41,7 +49,6 @@ FREELANCER_PROFILE = {
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
 
 def _load_rate_limits() -> dict:
-    """Load rate limit tracking from file."""
     if os.path.exists(PROPOSAL_RATE_FILE):
         try:
             with open(PROPOSAL_RATE_FILE) as f:
@@ -52,49 +59,98 @@ def _load_rate_limits() -> dict:
 
 
 def _save_rate_limits(data: dict):
-    """Save rate limit tracking to file."""
     with open(PROPOSAL_RATE_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 
 def _check_rate_limit(chat_id: str) -> tuple[bool, int]:
-    """Check if user has reached daily proposal limit.
-    Returns (allowed, remaining_count).
-    """
     today = date.today().isoformat()
     limits = _load_rate_limits()
-    
     user_data = limits.get(chat_id, {"date": None, "count": 0})
-    
-    # Reset if new day
     if user_data.get("date") != today:
         user_data = {"date": today, "count": 0}
-    
     remaining = MAX_PROPOSALS_PER_DAY - user_data["count"]
-    allowed = remaining > 0
-    
-    return allowed, max(0, remaining)
+    return remaining > 0, max(0, remaining)
 
 
 def _increment_proposal_count(chat_id: str):
-    """Increment proposal count for user today."""
     today = date.today().isoformat()
     limits = _load_rate_limits()
-    
     user_data = limits.get(chat_id, {"date": None, "count": 0})
-    
     if user_data.get("date") != today:
         user_data = {"date": today, "count": 0}
-    
     user_data["count"] += 1
     limits[chat_id] = user_data
     _save_rate_limits(limits)
 
 
+# ── User CV Storage ────────────────────────────────────────────────────────────
+
+def _load_user_cvs() -> dict:
+    if os.path.exists(USER_CV_FILE):
+        try:
+            with open(USER_CV_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+
+def _save_user_cvs(data: dict):
+    with open(USER_CV_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def get_user_cv_text(chat_id: str) -> Optional[str]:
+    """Get stored CV text for a user."""
+    cvs = _load_user_cvs()
+    entry = cvs.get(str(chat_id))
+    if entry and entry.get("text"):
+        return entry["text"]
+    return None
+
+
+def save_user_cv(chat_id: str, cv_text: str) -> str:
+    """Save CV text for a user. Returns the saved text."""
+    cvs = _load_user_cvs()
+    cvs[str(chat_id)] = {
+        "text": cv_text,
+        "uploaded_at": datetime.now().isoformat(),
+    }
+    _save_user_cvs(cvs)
+    return cv_text
+
+
+def extract_text_from_pdf(pdf_path: str) -> Optional[str]:
+    """Extract text from a PDF file using PyPDF2.
+    
+    Returns the extracted text or None if extraction fails.
+    """
+    try:
+        from PyPDF2 import PdfReader
+    except ImportError:
+        logger.warning("PyPDF2 not available for PDF extraction")
+        return None
+
+    try:
+        reader = PdfReader(pdf_path)
+        text_parts = []
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text_parts.append(page_text)
+        full_text = "\n".join(text_parts)
+        # Clean up whitespace
+        full_text = re.sub(r"\s+", " ", full_text).strip()
+        return full_text if full_text else None
+    except Exception as e:
+        logger.error(f"PDF extraction error: {e}")
+        return None
+
+
 # ── Proposal Cache ────────────────────────────────────────────────────────────
 
 def _load_cache() -> dict:
-    """Load cached proposals from file."""
     if os.path.exists(PROPOSAL_CACHE_FILE):
         try:
             with open(PROPOSAL_CACHE_FILE) as f:
@@ -105,17 +161,14 @@ def _load_cache() -> dict:
 
 
 def _save_cache(cache: dict):
-    """Save proposal cache to file."""
     with open(PROPOSAL_CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=2)
 
 
 def get_cached_proposal(project_key: str) -> Optional[str]:
-    """Get cached proposal if exists."""
     cache = _load_cache()
     entry = cache.get(project_key)
     if entry:
-        # Check if less than 24 hours old
         cached_time = datetime.fromisoformat(entry["cached_at"])
         if (datetime.now() - cached_time).total_seconds() < 86400:
             return entry["proposal"]
@@ -123,7 +176,6 @@ def get_cached_proposal(project_key: str) -> Optional[str]:
 
 
 def cache_proposal(project_key: str, proposal: str):
-    """Cache a generated proposal."""
     cache = _load_cache()
     cache[project_key] = {
         "proposal": proposal,
@@ -135,33 +187,16 @@ def cache_proposal(project_key: str, proposal: str):
 # ── Budget Parser ─────────────────────────────────────────────────────────────
 
 def _parse_budget(budget_str: str) -> Optional[float]:
-    """Extract numeric budget value from string.
-    
-    Handles formats like:
-    - "Rp 500.000"
-    - "Rp 500.000 - 1.000.000"
-    - "Rp 500rb"
-    - "500.000"
-    """
     if not budget_str or budget_str == "-":
         return None
-    
-    # Clean the string - remove "Rp", dots (thousand separators), quotes
     cleaned = budget_str.replace("Rp", "").replace(".", "").replace("'", "").strip()
-    
-    # Find all numbers
     nums = re.findall(r"\d+", cleaned)
     if not nums:
         return None
-    
     try:
-        # Take the FIRST number found (that's the minimum budget in a range)
         val = float(nums[0])
-        
-        # Handle "500rb" style budgets (e.g., "500rb" -> 500000)
         if "rb" in budget_str.lower() and val < 10000:
             val *= 1000
-        
         return val
     except ValueError:
         return None
@@ -175,7 +210,6 @@ def _generate_template_proposal(
     project_description: str,
     client_name: str,
 ) -> str:
-    """Generate proposal using template fallback."""
     budget_val = _parse_budget(project_budget)
     budget_formatted = project_budget if project_budget else "sesuai budget"
 
@@ -185,14 +219,12 @@ def _generate_template_proposal(
     portfolio = FREELANCER_PROFILE["portfolio"]
     email = FREELANCER_PROFILE["email"]
 
-    # Simple experience paragraph
     experience = (
         f"Saya telah berpengalaman {years} tahun dalam pengembangan web dan backend, "
         f"dengan fokus pada teknologi Java, Golang, dan framework modern. "
         f"Saya telah berhasil menyelesaikan berbagai project serupa dengan kepuasan client."
     )
 
-    # Simple approach paragraph
     approach = (
         "Saya akan mengerjakan project ini dengan langkah-langkah terstruktur: "
         "1) Analisis kebutuhan, 2) Desain arsitektur, 3) Development dengan code quality tinggi, "
@@ -200,7 +232,6 @@ def _generate_template_proposal(
         "Saya berkomitmen memberikan hasil terbaik dalam timeline yang disepakati."
     )
 
-    # Estimate timeline based on budget
     if budget_val and budget_val > 5000000:
         timeline = "2-4 minggu"
     elif budget_val and budget_val > 1000000:
@@ -208,7 +239,7 @@ def _generate_template_proposal(
     else:
         timeline = "3-7 hari"
 
-    proposal = f"""Kepada Yth. {client_name},
+    return f"""Kepada Yth. {client_name},
 
 Dengan hormat,
 
@@ -231,14 +262,12 @@ Terima kasih,
 {my_name}
 Contact: {email}"""
 
-    return proposal
-
 
 # ── LLM Proposal Generation ───────────────────────────────────────────────────
 
-async def _call_openrouter_llm(prompt: str, timeout: int = 30) -> Optional[str]:
+async def _call_openrouter_llm(prompt: str, timeout: int = 45) -> Optional[str]:
     """Call OpenRouter LLM to generate proposal."""
-    if not OPENROUTER_API_KEY or OPENROUTER_API_KEY.startswith("***"):
+    if not OPENROUTER_API_KEY:
         logger.warning("OpenRouter API key not configured")
         return None
 
@@ -254,13 +283,8 @@ async def _call_openrouter_llm(prompt: str, timeout: int = 30) -> Optional[str]:
 
     payload = {
         "model": OPENROUTER_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "max_tokens": 1024,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1200,
         "temperature": 0.7,
     }
 
@@ -274,21 +298,27 @@ async def _call_openrouter_llm(prompt: str, timeout: int = 30) -> Optional[str]:
 
     try:
         loop = asyncio.get_event_loop()
-        with loop.run_in_executor(None, lambda: urllib.request.urlopen(req, timeout=timeout)) as resp:
-            result = json.loads(resp.read().decode())
-            
+        resp = await loop.run_in_executor(
+            None, lambda: urllib.request.urlopen(req, timeout=timeout)
+        )
+        result = json.loads(resp.read().decode())
+
         if result.get("choices") and len(result["choices"]) > 0:
             content = result["choices"][0].get("message", {}).get("content", "")
             # Clean up any thinking tags if present
             content = re.sub(r"<\|.*?\|>", "", content, flags=re.DOTALL).strip()
-            return content
+            return content if content else None
         return None
-        
+
     except asyncio.TimeoutError:
         logger.error("OpenRouter API timeout")
         return None
     except urllib.error.HTTPError as e:
-        logger.error(f"OpenRouter HTTP error: {e.code} - {e.reason}")
+        try:
+            body = e.read().decode()
+            logger.error(f"OpenRouter HTTP {e.code}: {body[:200]}")
+        except Exception:
+            logger.error(f"OpenRouter HTTP error: {e.code} - {e.reason}")
         return None
     except Exception as e:
         logger.error(f"OpenRouter API error: {e}")
@@ -300,25 +330,37 @@ def _build_proposal_prompt(
     project_budget: str,
     project_description: str,
     client_name: str,
+    cv_text: Optional[str] = None,
 ) -> str:
     """Build the LLM prompt for proposal generation."""
-    return f"""Buatkan proposal freelance dalam Bahasa Indonesia untuk project:
+    cv_section = ""
+    if cv_text and len(cv_text) > 20:
+        # Include first 1500 chars of CV for context
+        cv_snippet = cv_text[:1500]
+        cv_section = f"\nCV / Background Freelancer:\n{cv_snippet}\n\n( Gunakan info dari CV di atas untuk memperkuat proposal )"
+
+    return f"""Buatkan proposal freelance profesional dalam Bahasa Indonesia untuk project ini:
+
+PROJECT:
 - Judul: {project_title}
 - Budget: {project_budget}
 - Deskripsi: {project_description}
 - Client: {client_name}
 
-Profil freelancer:
-- Nama: {FREELANCER_PROFILE["name"]}
-- Title: {FREELANCER_PROFILE["title"]}
-- Skills: {FREELANCER_PROFILE["skills"]}
-- Experience: {FREELANCER_PROFILE["experience_years"]}+ tahun
-- Portofolio: {FREELANCER_PROFILE["portfolio"]}
+FREELANCER:
+- Nama: {FREELANCER_PROFILE['name']}
+- Title: {FREELANCER_PROFILE['title']}
+- Skills: {FREELANCER_PROFILE['skills']}
+- Experience: {FREELANCER_PROFILE['experience_years']}+ tahun
+- Portofolio: {FREELANCER_PROFILE['portfolio']}{cv_section}
 
-Format: formal, profesional, dalam Bahasa Indonesia
-Panjang: 150-250 kata
+FORMAT:
+- Bahasa: Indonesia formal profesional
+- Panjang: 150-250 kata
+- Include: perkenalan, highlight relevan skill, pendekatan kerja, timeline estimasi, closing dengan kontak
+- Jangan gunakan tanda pemisah seperti ----- atau ###
 
-Proposal:"""
+Tulis langsung proposal-nya tanpa preamble:"""
 
 
 # ── Main Generator Function ───────────────────────────────────────────────────
@@ -329,37 +371,36 @@ async def generate_proposal(
     project_description: str,
     client_name: str,
     project_url: str = "",
+    cv_text: Optional[str] = None,
     use_cache: bool = True,
 ) -> tuple[str, bool]:
     """Generate a freelance proposal.
-    
+
     Returns (proposal_text, was_cached).
-    If LLM fails, falls back to template generation.
+    Uses LLM if available, falls back to template.
     """
-    # Create cache key from project title + budget
     cache_key = f"{project_title[:50]}_{project_budget[:20]}".replace(" ", "_")
-    
-    # Check cache first
+
     if use_cache:
         cached = get_cached_proposal(cache_key)
         if cached:
             return cached, True
-    
-    # Try LLM generation first
+
+    # Try LLM generation
     prompt = _build_proposal_prompt(
         project_title,
         project_budget,
         project_description,
         client_name,
+        cv_text,
     )
-    
+
     llm_proposal = await _call_openrouter_llm(prompt)
-    
+
     if llm_proposal and len(llm_proposal) > 50:
-        # Cache the successful LLM generation
         cache_proposal(cache_key, llm_proposal)
         return llm_proposal, False
-    
+
     # Fall back to template-based generation
     logger.info("LLM generation failed, using template fallback")
     template_proposal = _generate_template_proposal(
@@ -368,8 +409,6 @@ async def generate_proposal(
         project_description,
         client_name,
     )
-    
-    # Cache the template proposal too
     cache_proposal(cache_key, template_proposal)
     return template_proposal, False
 
@@ -378,77 +417,67 @@ async def generate_proposal(
 
 def extract_project_info_from_url(url: str) -> dict:
     """Extract project info from URL.
-    
+
     Supports:
-    - projects.co.id/projects/xxx
-    - fastwork.id/...
-    - sribu.com/...
+    - projects.co.id: /projects/ID, /view/ID/title, /show/ID
+    - fastwork.id: /job/ID or direct job URLs
+    - sribu.com: /contests/ID or direct contest URLs
     """
+    url = url.strip()
     info = {
         "source": None,
         "project_id": None,
         "url": url,
     }
-    
+
     if "projects.co.id" in url:
-        info["source"] = "projects"
-        # Extract ID from URL like /projects/12345 or /public/browse_projects/show/12345
-        match = re.search(r'/projects?/(\d+)', url)
-        if match:
-            info["project_id"] = match.group(1)
+        info["source"] = "projects.co.id"
+        # projects.co.id uses 6-char hex IDs in various URL formats
+        for pattern in [
+            r'/projects?/([a-f0-9]{6})',
+            r'/view/([a-f0-9]{6})/',
+            r'/show/([a-f0-9]{6})',
+        ]:
+            m = re.search(pattern, url)
+            if m:
+                info["project_id"] = m.group(1)
+                break
+
     elif "fastwork.id" in url:
-        info["source"] = "fastwork"
-        # Fastwork URLs typically have job ID in path
-        match = re.search(r'/job/(\w+)', url)
-        if match:
-            info["project_id"] = match.group(1)
+        info["source"] = "fastwork.id"
+        m = re.search(r'/job/([a-zA-Z0-9_-]+)', url)
+        if m:
+            info["project_id"] = m.group(1)
+
     elif "sribu.com" in url:
-        info["source"] = "sribu"
-        # Sribu contest URLs
-        match = re.search(r'/contests?/(\w+)', url)
-        if match:
-            info["project_id"] = match.group(1)
-    
+        info["source"] = "sribu.com"
+        m = re.search(r'/contests?/([a-zA-Z0-9_-]+)', url)
+        if m:
+            info["project_id"] = m.group(1)
+
     return info
 
 
-# ── Proposal Formatter ────────────────────────────────────────────────────────
+# ── Proposal Display Formatter (copyable, no buttons) ─────────────────────────
 
-def format_proposal_for_display(proposal: str, project_title: str, source: str) -> tuple[str, dict]:
-    """Format proposal with header for display to user.
+def format_proposal_for_display(
+    proposal: str,
+    project_title: str,
+    source: str,
+) -> str:
+    """Format proposal for display. Returns clean copyable text with header.
     
-    Returns (display_text, reply_markup).
+    No buttons, no separators, clean copy-paste friendly format.
     """
-    text = f"""📝 <b>Proposal Draft</b>
-
-<b>Project:</b> {project_title}
-<b>Sumber:</b> {source}
-
-──────────────────────────────────
+    return f"""📝 Proposal untuk: {project_title}
+🌐 Sumber: {source}
 
 {proposal}
 
-──────────────────────────────────
-
-Gunakan tombol di bawah untuk action."""
-
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {"text": "📤 Kirim ke Client", "callback_data": f"proposal:send:{source}"},
-                {"text": "✏️ Edit Proposal", "callback_data": f"proposal:edit:{source}"},
-            ],
-            [
-                {"text": "❌ Batalkan", "callback_data": "proposal:cancel"},
-            ]
-        ]
-    }
-    
-    return text, keyboard
+💡 Salin teks di atas dan kirimkan ke client."""
 
 
 if __name__ == "__main__":
-    # Test proposal generation
     async def test():
         proposal, cached = await generate_proposal(
             project_title="Website Toko Online dengan React dan Node.js",
@@ -459,5 +488,5 @@ if __name__ == "__main__":
         print(f"Cached: {cached}")
         print("=" * 60)
         print(proposal)
-    
+
     asyncio.run(test())

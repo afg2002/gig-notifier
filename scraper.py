@@ -424,6 +424,143 @@ def scrape_all_pages(
     return all_projects
 
 
+@dataclass
+class ProjectDetail:
+    """Detail info for a project used in proposal generation."""
+    project_id: str
+    title: str
+    description: str
+    budget: str
+    client_name: str
+    source: str
+    url: str
+
+
+def scrape_project_detail(url: str) -> ProjectDetail | None:
+    """Scrape a project detail page to get title, budget, description, client name.
+
+    For projects.co.id: requires login, so we search through cached listings instead.
+    For Fastwork/Sribu: direct scraping works.
+
+    Returns ProjectDetail or None if not found.
+    """
+    url = url.strip()
+
+    # ── projects.co.id ────────────────────────────────────────────────────────
+    if "projects.co.id" in url:
+        # Extract project ID from various URL formats
+        # /projects/ID, /view/ID/title, /public/browse_projects/show/ID
+        project_id = None
+        for pattern in [
+            r'/projects?/([a-f0-9]{6})',
+            r'/view/([a-f0-9]{6})/',
+            r'/show/([a-f0-9]{6})',
+        ]:
+            m = re.search(pattern, url)
+            if m:
+                project_id = m.group(1)
+                break
+
+        if not project_id:
+            return None
+
+        # Search through all category listings to find this project
+        # (projects.co.id requires login for detail pages)
+        for cat in CATEGORIES:
+            for page in range(1, 3):  # Check first 2 pages per category
+                try:
+                    projects = scrape_listing(cat["id"], page)
+                    for p in projects:
+                        if p.project_id == project_id:
+                            return ProjectDetail(
+                                project_id=project_id,
+                                title=p.title,
+                                description=p.description or "Project freelance dari projects.co.id",
+                                budget=p.budget or "-",
+                                client_name=p.owner_name or "Client",
+                                source="projects.co.id",
+                                url=url,
+                            )
+                except Exception as e:
+                    logger.warning(f"Failed to search cat {cat['id']} page {page}: {e}")
+                    continue
+
+        # Project not found in listings - return partial info from ID
+        return ProjectDetail(
+            project_id=project_id,
+            title=f"Project {project_id}",
+            description="Project freelance dari projects.co.id",
+            budget="-",
+            client_name="Client",
+            source="projects.co.id",
+            url=url,
+        )
+
+    # ── Fastwork.id ─────────────────────────────────────────────────────────
+    elif "fastwork.id" in url:
+        try:
+            scraper = _get_scraper()
+            resp = scraper.get(url, timeout=15)
+            html = resp.text
+
+            # Extract title
+            title_m = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
+            title = _clean_text(title_m.group(1)) if title_m else "Project Fastwork"
+
+            # Extract budget from common patterns
+            budget_m = re.search(r'(?:Budget|Price|Harga)[^$]*?(?:Rp|USD)\s*([\d.,]+)', html, re.I)
+            budget = budget_m.group(0) if budget_m else "-"
+
+            # Extract description
+            desc_m = re.search(r'"description"[^>]*>\s*([^"]{50,500})', html)
+            description = _clean_text(desc_m.group(1)) if desc_m else "Project dari Fastwork.id"
+
+            return ProjectDetail(
+                project_id="fastwork",
+                title=title,
+                description=description,
+                budget=budget,
+                client_name="Client",
+                source="fastwork.id",
+                url=url,
+            )
+        except Exception as e:
+            logger.warning(f"Fastwork scrape failed: {e}")
+            return None
+
+    # ── Sribu.com ───────────────────────────────────────────────────────────
+    elif "sribu.com" in url:
+        try:
+            scraper = _get_scraper()
+            resp = scraper.get(url, timeout=15)
+            html = resp.text
+
+            title_m = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
+            title = _clean_text(title_m.group(1)) if title_m else "Contest Sribu"
+
+            desc_m = re.search(r'"description"[^>]*>\s*([^"]{50,500})', html)
+            description = _clean_text(desc_m.group(1)) if desc_m else "Kontes desain dari Sribu.com"
+
+            # Sribu shows prize budget
+            budget_m = re.search(r'(?:Hadiah|Prize)[^$]*?(?:Rp|USD)\s*([\d.,]+)', html, re.I)
+            budget = budget_m.group(0) if budget_m else "Premio tidak ditentukan"
+
+            return ProjectDetail(
+                project_id="sribu",
+                title=title,
+                description=description,
+                budget=budget,
+                client_name="Client",
+                source="sribu.com",
+                url=url,
+            )
+        except Exception as e:
+            logger.warning(f"Sribu scrape failed: {e}")
+            return None
+
+    return None
+
+
 if __name__ == "__main__":
     results = scrape_listing("all", 1)
     for p in results[:3]:
