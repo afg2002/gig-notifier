@@ -812,10 +812,8 @@ def build_main_menu_keyboard() -> dict:
             [{"text": "📄 Upload CV PDF", "callback_data": "menu:uploadcv"},
              {"text": "👁️ Lihat CV Saya", "callback_data": "menu:mycv"}],
 
-            # ── Monitoring & Stats ──
-            [{"text": "🔔 Pengaturan Monitor", "callback_data": "menu:monitor"},
-             {"text": "📊 Status Monitor", "callback_data": "menu:status"}],
-            [{"text": "🔄 Refresh Sekarang", "callback_data": "menu:refresh"},
+            # ── Info & Stats ──
+            [{"text": "🔄 Refresh Projects", "callback_data": "menu:refresh"},
              {"text": "📈 Daily Digest", "callback_data": "menu:digest"}],
             [{"text": "📉 Trend Analysis", "callback_data": "menu:trends"},
              {"text": "🏆 Top Clients", "callback_data": "menu:topclients"}],
@@ -1384,12 +1382,27 @@ class ProjectsBot:
             reply_markup=build_monitor_keyboard(self.monitor),
         )
 
-    async def _cmd_refresh(self, chat_id: str):
-        msg = await send_message(
-            TELEGRAM_BOT_TOKEN,
-            chat_id,
-            "🔄 <b>Refreshing...</b>\nSedang mengambil project terbaru...",
-        )
+    async def _cmd_refresh(self, chat_id: str, menu_message_id: int = None):
+        """Refresh projects and show new ones. Updates menu message if message_id provided."""
+        if menu_message_id:
+            # Called from menu button — update the menu message with loading
+            try:
+                await edit_message(
+                    TELEGRAM_BOT_TOKEN,
+                    int(chat_id),
+                    menu_message_id,
+                    "🔄 <b>Refreshing...</b>\nSedang mengambil project terbaru...",
+                    reply_markup={"inline_keyboard": [[{"text": "⏳ Loading...", "callback_data": "noop"}]]},
+                )
+            except Exception:
+                pass  # Ignore if edit fails
+        else:
+            # Called from /refresh command — send new message
+            await send_message(
+                TELEGRAM_BOT_TOKEN,
+                chat_id,
+                "🔄 <b>Refreshing...</b>\nSedang mengambil project terbaru...",
+            )
 
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1407,21 +1420,38 @@ class ProjectsBot:
             if len(new_projects) > 10:
                 text += f"\n...dan {len(new_projects) - 10} project lainnya."
 
-            await edit_message(
-                TELEGRAM_BOT_TOKEN,
-                int(chat_id),
-                msg["result"]["message_id"],
-                text,
-                reply_markup=build_main_menu_keyboard(),
-            )
+            if menu_message_id:
+                await edit_message(
+                    TELEGRAM_BOT_TOKEN,
+                    int(chat_id),
+                    menu_message_id,
+                    text,
+                    reply_markup=build_main_menu_keyboard(),
+                )
+            else:
+                await send_message(
+                    TELEGRAM_BOT_TOKEN,
+                    chat_id,
+                    text,
+                    reply_markup=build_main_menu_keyboard(),
+                )
         else:
-            await edit_message(
-                TELEGRAM_BOT_TOKEN,
-                int(chat_id),
-                msg["result"]["message_id"],
-                "✅ <b>Tidak ada project baru</b>\nSemua project sudah di-notifikasi.",
-                reply_markup=build_main_menu_keyboard(),
-            )
+            msg = "✅ <b>Tidak ada project baru</b>\nSemua project sudah di-notified."
+            if menu_message_id:
+                await edit_message(
+                    TELEGRAM_BOT_TOKEN,
+                    int(chat_id),
+                    menu_message_id,
+                    msg,
+                    reply_markup=build_main_menu_keyboard(),
+                )
+            else:
+                await send_message(
+                    TELEGRAM_BOT_TOKEN,
+                    chat_id,
+                    msg,
+                    reply_markup=build_main_menu_keyboard(),
+                )
 
     async def _cmd_help(self, chat_id: str):
         await self._cmd_help_text(chat_id)
@@ -1915,26 +1945,15 @@ class ProjectsBot:
             await self._fw_monitor(chat_id, message_id, callback_id)
 
     async def _fw_browse(self, chat_id: str, message_id: int, callback_id: str):
-        """Show Fastwork job categories — only monitored ones."""
+        """Show Fastwork job categories — ALL categories, not just monitored."""
         cats = get_fastwork_categories()
         if not cats:
             await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="⚠️ Gagal load kategori Fastwork")
             return
 
-        monitored = self.fw_monitor.monitored_tags
-        cats_to_show = [c for c in cats if c["id"] in monitored]
-
-        if not cats_to_show:
-            await edit_message(
-                TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
-                "⚠️ Kamu tidak memantau kategori Fastwork mana pun.\n\nGunakan /fw setup untuk menambahkan kategori.",
-                reply_markup={"inline_keyboard": [[{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}]]},
-            )
-            return
-
         buttons = []
         row = []
-        for cat in cats_to_show:
+        for cat in cats:
             row.append({
                 "text": cat["name"],
                 "callback_data": f"fwcat:{cat['id']}:1",
@@ -1946,12 +1965,12 @@ class ProjectsBot:
             buttons.append(row)
         buttons.append([{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}])
 
-        cat_text = "\n".join([f"• {c['name']}" for c in cats_to_show])
+        cat_text = "\n".join([f"• {c['name']}" for c in cats[:14]])
         await edit_message(
             TELEGRAM_BOT_TOKEN,
             int(chat_id),
             message_id,
-            f"⚡ <b>Fastwork Categories</b> (yang kamu monitor)\n\n{cat_text}\n\nPilih kategori:",
+            f"⚡ <b>Fastwork Categories</b> (semua)\n\n{cat_text}\n\nPilih kategori:",
             reply_markup={"inline_keyboard": buttons},
         )
 
@@ -2387,12 +2406,16 @@ class ProjectsBot:
                 reply_markup=build_monitor_keyboard(self.monitor),
             )
         elif action == "refresh":
-            await self._cmd_refresh(chat_id)
+            await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="🔄 Loading project terbaru...")
+            await self._cmd_refresh(chat_id, message_id)
         elif action == "digest":
+            await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="📈 Generating digest...")
             await self._cmd_digest(chat_id)
         elif action == "trends":
+            await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="📉 Loading trends...")
             await self._cmd_trends(chat_id)
         elif action == "topclients":
+            await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="🏆 Loading top clients...")
             await self._cmd_top_clients(chat_id)
         elif action == "proposal":
             await edit_message(
