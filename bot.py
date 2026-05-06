@@ -63,6 +63,9 @@ from proposal_generator import (
     get_user_cv_text,
     save_user_cv,
     extract_text_from_pdf,
+    get_user_profile,
+    save_user_profile,
+    delete_user_profile,
 )
 
 logging.basicConfig(
@@ -1260,6 +1263,10 @@ class ProjectsBot:
             await self._cmd_upload_cv(chat_id, text)
         elif text.startswith("/mycv"):
             await self._cmd_my_cv(chat_id)
+        elif text.startswith("/setprofile"):
+            await self._cmd_setprofile(chat_id, text)
+        elif text.startswith("/myprofile"):
+            await self._cmd_myprofile(chat_id)
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
@@ -1476,14 +1483,17 @@ class ProjectsBot:
             "/trends — Analisis trend per kategori\n"
             "/topclients — Top 10 client terbanyak\n\n"
             "<b>📝 AI Proposal Commands:</b>\n"
-            "/proposal &lt;url&gt; — Generate AI proposal dari URL project\n"
+            "/proposal <url> — Generate AI proposal dari URL project\n"
             "/uploadcv — Upload CV PDF (untuk proposal personal)\n"
-            "/mycv — Lihat CV yang sudah diupload\n\n"
+            "/mycv — Lihat CV yang sudah diupload\n"
+            "/setprofile — Set profil freelancer (multi-user support)\n"
+            "/myprofile — Lihat profil yang sudah di-set\n\n"
             "<b>🛠️ Other:</b>\n"
             "/start — Menu utama\n"
             "/help — Panduan ini\n\n"
             "<b>💡 Tips:</b>\n"
-            "• Upload CV dulu dengan /uploadcv agar proposal lebih personal\n"
+            "• Set profil dulu dengan /setprofile agar proposal sesuai data Anda\n"
+            "• Upload CV dengan /uploadcv untuk proposal lebih personal\n"
             "• Aktifkan monitoring dengan /monitor agar tidak ada project terlewat\n"
             "• AI Proposal ada di setiap halaman detail project — klik tombol langsung!",
             reply_markup=build_main_menu_keyboard(),
@@ -1704,6 +1714,7 @@ class ProjectsBot:
 
         # Get user's CV if uploaded
         cv_text = get_user_cv_text(chat_id)
+        user_profile = get_user_profile(chat_id)  # Per-user profile
 
         # Update typing
         await tg_request(
@@ -1719,6 +1730,8 @@ class ProjectsBot:
                 client_name=client_name,
                 project_url=project_arg,
                 cv_text=cv_text,
+                user_profile=user_profile,
+                chat_id=chat_id,
             )
             _increment_proposal_count(chat_id)
 
@@ -1900,6 +1913,103 @@ class ProjectsBot:
                 "📭 <b>Belum Ada CV</b>\n\n"
                 "Anda belum upload CV. Kirim file PDF dengan "
                 "<code>/uploadcv</code> untuk upload."
+            )
+
+    async def _cmd_myprofile(self, chat_id: str):
+        """Handle /myprofile - show user's profile."""
+        profile = get_user_profile(chat_id)
+        if profile:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                f"👤 <b>Profil Anda</b>\n\n"
+                f"<b>Nama:</b> {profile.get('name', '-')}\n"
+                f"<b>Title:</b> {profile.get('title', '-')}\n"
+                f"<b>Email:</b> {profile.get('email', '-')}\n"
+                f"<b>Skills:</b> {profile.get('skills', '-')}\n"
+                f"<b>Experience:</b> {profile.get('experience_years', 0)} tahun\n"
+                f"<b>Portfolio:</b> {profile.get('portfolio', '-')}\n"
+                f"<b>GitHub:</b> {profile.get('github', '-')}\n\n"
+                f"Di-set: {profile.get('set_at', 'N/A')[:10]}\n\n"
+                "Update dengan <code>/setprofile</code>"
+            )
+        else:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "📭 <b>Belum Ada Profil</b>\n\n"
+                "Anda belum mengatur profil. Gunakan:\n"
+                "<code>/setprofile</code> untuk instruksi cara set profil.\n\n"
+                "Atau langsung dengan format:\n"
+                "<code>/setprofile Nama|Title|Skills|Years|Portfolio</code>\n\n"
+                "Contoh:\n"
+                "<code>/setprofile Budi Santoso|Web Developer|JavaScript, React, Node|3|https://budi.dev</code>"
+            )
+
+    async def _cmd_setprofile(self, chat_id: str, text: str):
+        """Handle /setprofile - set user's profile.
+        
+        Format: /setprofile Nama|Title|Skills|Years|Portfolio
+        Or: /setprofile (to see instructions)
+        """
+        parts = text.split("|")
+        
+        if len(parts) < 5:
+            # Show instructions
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "📝 <b>Set Profil Freelancer</b>\n\n"
+                "Format: <code>/setprofile Nama|Title|Skills|Years|Portfolio</code>\n\n"
+                "Contoh:\n"
+                "<code>/setprofile Budi Santoso|Web Developer|JavaScript, React, Node|3|https://budi.dev</code>\n\n"
+                "Field:\n"
+                "• <b>Nama</b> - Nama lengkap Anda\n"
+                "• <b>Title</b> - Judul profesional (Web Developer, Designer, dll)\n"
+                "• <b>Skills</b> - Skill dipisahkan koma\n"
+                "• <b>Years</b> - Tahun pengalaman (angka)\n"
+                "• <b>Portfolio</b> - Link portfolio/GitHub\n\n"
+                "Opsional (kosongkan dengan -):\n"
+                "• Email, GitHub, LinkedIn, Phone\n\n"
+                "Setelah set profil, upload CV dengan <code>/uploadcv</code> untuk proposal lebih personal!"
+            )
+            return
+        
+        try:
+            name = parts[0].strip() or "-"
+            title = parts[1].strip() or "-"
+            skills = parts[2].strip() or "-"
+            experience_years = int(parts[3].strip()) if parts[3].strip().isdigit() else 0
+            portfolio = parts[4].strip() or "-"
+            email = parts[5].strip() if len(parts) > 5 and parts[5].strip() != "-" else ""
+            github = parts[6].strip() if len(parts) > 6 and parts[6].strip() != "-" else ""
+            
+            profile = save_user_profile(chat_id, {
+                "name": name,
+                "title": title,
+                "skills": skills,
+                "experience_years": experience_years,
+                "portfolio": portfolio,
+                "email": email,
+                "github": github,
+            })
+            
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                f"✅ <b>Profil Berhasil Disimpan!</b>\n\n"
+                f"<b>Nama:</b> {profile['name']}\n"
+                f"<b>Title:</b> {profile['title']}\n"
+                f"<b>Skills:</b> {profile['skills']}\n"
+                f"<b>Experience:</b> {profile['experience_years']} tahun\n"
+                f"<b>Portfolio:</b> {profile['portfolio']}\n\n"
+                "Profil ini akan digunakan untuk generate AI proposal.\n"
+                "Upload CV dengan <code>/uploadcv</code> untuk hasil lebih personal!"
+            )
+        except Exception as e:
+            logger.error(f"Set profile error: {e}")
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "❌ <b>Gagal menyimpan profil</b>\n\n"
+                f"Error: {str(e)[:100]}\n\n"
+                "Pastikan format benar:\n"
+                "<code>/setprofile Nama|Title|Skills|Years|Portfolio</code>"
             )
 
     # ---- Source Selection (Projects vs Fastwork) ----
@@ -2824,6 +2934,7 @@ class ProjectsBot:
 
         try:
             cv_text = get_user_cv_text(chat_id)
+            user_profile = get_user_profile(chat_id)  # Per-user profile
             loop = asyncio.get_event_loop()
 
             # Scrape project detail in executor
@@ -2842,7 +2953,7 @@ class ProjectsBot:
                 client_name = "Client"
                 display_source = source
 
-            # Generate proposal
+            # Generate proposal (uses user_profile if set, otherwise falls back to default)
             proposal, was_cached = await generate_proposal(
                 project_title=project_title,
                 project_budget=project_budget,
@@ -2850,6 +2961,8 @@ class ProjectsBot:
                 client_name=client_name,
                 project_url=proj_url,
                 cv_text=cv_text,
+                user_profile=user_profile,
+                chat_id=chat_id,
             )
             _increment_proposal_count(chat_id)
 

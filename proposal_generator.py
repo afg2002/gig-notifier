@@ -20,6 +20,7 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 PROPOSAL_CACHE_FILE = os.path.join(DATA_DIR, "proposal_cache.json")
 PROPOSAL_RATE_FILE = os.path.join(DATA_DIR, "proposal_rate.json")
 USER_CV_FILE = os.path.join(DATA_DIR, "user_cvs.json")  # {chat_id: {text, uploaded_at}}
+USER_PROFILE_FILE = os.path.join(DATA_DIR, "user_profiles.json")  # {chat_id: {name, title, email, github, skills, experience_years, portfolio, linkedin, phone, set_at}}
 MAX_PROPOSALS_PER_DAY = 5
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -121,6 +122,59 @@ def save_user_cv(chat_id: str, cv_text: str) -> str:
     return cv_text
 
 
+# ── User Profile Storage ───────────────────────────────────────────────────────
+
+def _load_user_profiles() -> dict:
+    if os.path.exists(USER_PROFILE_FILE):
+        try:
+            with open(USER_PROFILE_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+
+def _save_user_profiles(data: dict):
+    with open(USER_PROFILE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def get_user_profile(chat_id: str) -> Optional[dict]:
+    """Get stored profile for a user. Returns dict or None if not set."""
+    profiles = _load_user_profiles()
+    entry = profiles.get(str(chat_id))
+    if entry and entry.get("name"):
+        return entry
+    return None
+
+
+def save_user_profile(chat_id: str, profile: dict) -> dict:
+    """Save profile for a user. Returns the saved profile."""
+    profiles = _load_user_profiles()
+    profiles[str(chat_id)] = {
+        "name": profile.get("name", ""),
+        "title": profile.get("title", ""),
+        "email": profile.get("email", ""),
+        "github": profile.get("github", ""),
+        "skills": profile.get("skills", ""),
+        "experience_years": profile.get("experience_years", 0),
+        "portfolio": profile.get("portfolio", ""),
+        "linkedin": profile.get("linkedin", ""),
+        "phone": profile.get("phone", ""),
+        "set_at": datetime.now().isoformat(),
+    }
+    _save_user_profiles(profiles)
+    return profiles[str(chat_id)]
+
+
+def delete_user_profile(chat_id: str):
+    """Delete profile for a user."""
+    profiles = _load_user_profiles()
+    if str(chat_id) in profiles:
+        del profiles[str(chat_id)]
+        _save_user_profiles(profiles)
+
+
 def extract_text_from_pdf(pdf_path: str) -> Optional[str]:
     """Extract text from a PDF file using PyPDF2.
     
@@ -209,15 +263,19 @@ def _generate_template_proposal(
     project_budget: str,
     project_description: str,
     client_name: str,
+    user_profile: Optional[dict] = None,
 ) -> str:
     budget_val = _parse_budget(project_budget)
     budget_formatted = project_budget if project_budget else "sesuai budget"
 
-    my_name = FREELANCER_PROFILE["name"]
-    my_title = FREELANCER_PROFILE["title"]
-    years = FREELANCER_PROFILE["experience_years"]
-    portfolio = FREELANCER_PROFILE["portfolio"]
-    email = FREELANCER_PROFILE["email"]
+    # Use user profile if set, otherwise fall back to default
+    profile = user_profile if user_profile else FREELANCER_PROFILE
+    
+    my_name = profile["name"]
+    my_title = profile["title"]
+    years = profile["experience_years"]
+    portfolio = profile["portfolio"]
+    email = profile["email"]
 
     experience = (
         f"Saya telah berpengalaman {years} tahun dalam pengembangan web dan backend, "
@@ -331,8 +389,16 @@ def _build_proposal_prompt(
     project_description: str,
     client_name: str,
     cv_text: Optional[str] = None,
+    user_profile: Optional[dict] = None,
 ) -> str:
-    """Build the LLM prompt for proposal generation."""
+    """Build the LLM prompt for proposal generation.
+    
+    Uses user_profile if provided, otherwise falls back to FREELANCER_PROFILE.
+    cv_text provides supplemental info from uploaded CV.
+    """
+    # Use user profile if set, otherwise fall back to default
+    profile = user_profile if user_profile else FREELANCER_PROFILE
+    
     cv_section = ""
     if cv_text and len(cv_text) > 20:
         # Include first 1500 chars of CV for context
@@ -348,11 +414,11 @@ PROJECT:
 - Client: {client_name}
 
 FREELANCER:
-- Nama: {FREELANCER_PROFILE['name']}
-- Title: {FREELANCER_PROFILE['title']}
-- Skills: {FREELANCER_PROFILE['skills']}
-- Experience: {FREELANCER_PROFILE['experience_years']}+ tahun
-- Portofolio: {FREELANCER_PROFILE['portfolio']}{cv_section}
+- Nama: {profile['name']}
+- Title: {profile['title']}
+- Skills: {profile['skills']}
+- Experience: {profile['experience_years']}+ tahun
+- Portofolio: {profile['portfolio']}{cv_section}
 
 FORMAT:
 - Bahasa: Indonesia formal profesional
@@ -373,13 +439,20 @@ async def generate_proposal(
     project_url: str = "",
     cv_text: Optional[str] = None,
     use_cache: bool = True,
+    user_profile: Optional[dict] = None,
+    chat_id: str = "",
 ) -> tuple[str, bool]:
     """Generate a freelance proposal.
 
     Returns (proposal_text, was_cached).
     Uses LLM if available, falls back to template.
+    
+    user_profile: Per-user profile dict (from get_user_profile).
+                  If not provided, uses hardcoded FREELANCER_PROFILE.
+    chat_id: User's chat ID, included in cache key for multi-user isolation.
     """
-    cache_key = f"{project_title[:50]}_{project_budget[:20]}".replace(" ", "_")
+    # Include chat_id in cache key for multi-user support
+    cache_key = f"{chat_id}_{project_title[:50]}_{project_budget[:20]}".replace(" ", "_")
 
     if use_cache:
         cached = get_cached_proposal(cache_key)
@@ -393,6 +466,7 @@ async def generate_proposal(
         project_description,
         client_name,
         cv_text,
+        user_profile,
     )
 
     llm_proposal = await _call_openrouter_llm(prompt)
@@ -408,6 +482,7 @@ async def generate_proposal(
         project_budget,
         project_description,
         client_name,
+        user_profile,
     )
     cache_proposal(cache_key, template_proposal)
     return template_proposal, False
