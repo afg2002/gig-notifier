@@ -414,9 +414,12 @@ def extract_project_info_from_url(url: str) -> dict:
 
 # ── Proposal Formatter ────────────────────────────────────────────────────────
 
-def format_proposal_for_display(proposal: str, project_title: str, source: str) -> str:
-    """Format proposal with header for display to user."""
-    return f"""📝 <b>Proposal Draft</b>
+def format_proposal_for_display(proposal: str, project_title: str, source: str) -> tuple[str, dict]:
+    """Format proposal with header for display to user.
+    
+    Returns (display_text, reply_markup).
+    """
+    text = f"""📝 <b>Proposal Draft</b>
 
 <b>Project:</b> {project_title}
 <b>Sumber:</b> {source}
@@ -427,10 +430,21 @@ def format_proposal_for_display(proposal: str, project_title: str, source: str) 
 
 ──────────────────────────────────
 
-Gunakan command berikut:
-• <code>/send</code> — Kirim proposal ke client
-• <code>/edit</code> — Edit proposal
-• <code>/cancel</code> — Batalkan"""
+Gunakan tombol di bawah untuk action."""
+
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "📤 Kirim ke Client", "callback_data": f"proposal:send:{source}"},
+                {"text": "✏️ Edit Proposal", "callback_data": f"proposal:edit:{source}"},
+            ],
+            [
+                {"text": "❌ Batalkan", "callback_data": "proposal:cancel"},
+            ]
+        ]
+    }
+    
+    return text, keyboard
 
 
 if __name__ == "__main__":

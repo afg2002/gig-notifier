@@ -1307,11 +1307,62 @@ class ProjectsBot:
                 cat_id = parts[1]
                 self.sribu_monitor.toggle(cat_id)
                 await self._sribu_monitor(chat_id, message_id, callback_id)
+            elif action == "proposal":
+                sub_action = parts[1]
+                if sub_action == "send":
+                    await self._cb_proposal_send(chat_id, message_id, ":".join(parts[2:]), callback_id)
+                elif sub_action == "edit":
+                    await self._cb_proposal_edit(chat_id, message_id, callback_id)
+                elif sub_action == "cancel":
+                    await self._cb_proposal_cancel(chat_id, message_id, callback_id)
         except Exception as e:
             logger.error(f"Callback handler error: {e}")
             await answer_callback(
                 TELEGRAM_BOT_TOKEN, callback_id, text="⚠️ Terjadi error, coba lagi."
             )
+
+    # ---- Proposal Callback Handlers ----
+
+    async def _cb_proposal_send(self, chat_id: str, message_id: int, source: str, callback_id: str):
+        """Handle proposal send button - instructs user to copy and send manually."""
+        await answer_callback(
+            TELEGRAM_BOT_TOKEN, callback_id,
+            text="📤 Untuk mengirim proposal, salin teks proposal dan kirim ke client via email atau form di platform."
+        )
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            "📤 <b>Mengirim Proposal</b>\n\n"
+            "Untuk saat ini, silakan salin proposal di atas dan kirimkan ke client via:\n"
+            "• Email client\n"
+            "• Form submission di platform\n"
+            "• Chat langsung\n\n"
+            "Fitur kirim langsung via API akan segera hadir!"
+        )
+
+    async def _cb_proposal_edit(self, chat_id: str, message_id: int, callback_id: str):
+        """Handle proposal edit button."""
+        await answer_callback(
+            TELEGRAM_BOT_TOKEN, callback_id,
+            text="✏️ Ketik /proposal <url> untuk generate proposal baru."
+        )
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            "✏️ <b>Edit Proposal</b>\n\n"
+            "Ketik <code>/proposal [project_url]</code> untuk generate proposal baru.\n"
+            "Setiap proposal di-generate unik berdasarkan project."
+        )
+
+    async def _cb_proposal_cancel(self, chat_id: str, message_id: int, callback_id: str):
+        """Handle proposal cancel button."""
+        await answer_callback(
+            TELEGRAM_BOT_TOKEN, callback_id,
+            text="❌ Proposal dibatalkan."
+        )
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            "❌ <b>Proposal Dibatalkan</b>\n\n"
+            "Gunakan /browse untuk melihat project lain."
+        )
 
     # ---- Command Handlers ----
 
@@ -1623,13 +1674,13 @@ class ProjectsBot:
             # Increment rate limit counter
             _increment_proposal_count(chat_id)
 
-            # Format and send proposal
-            display = format_proposal_for_display(
+            # Format and send proposal with inline keyboard
+            display, reply_markup = format_proposal_for_display(
                 proposal,
                 f"Project {project_info['project_id'] or 'Unknown'}",
                 project_info["source"]
             )
-            await send_message(TELEGRAM_BOT_TOKEN, chat_id, display)
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, display, reply_markup=reply_markup)
 
         except Exception as e:
             logger.error(f"Proposal generation error: {e}")
