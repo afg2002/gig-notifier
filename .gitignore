@@ -11,3 +11,12 @@ bot.lock
 # Session/tracking data
 *.sqlite
 *.db
+
+# IDE
+.vscode/
+.idea/
+
+# Python
+*.egg-info/
+dist/
+build/

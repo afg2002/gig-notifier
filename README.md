@@ -126,7 +126,21 @@ Send `/start` to your bot on Telegram to begin.
 
 ```
 gig-notifier/
-├── bot.py                    # Main bot: commands, callbacks, polling, monitoring
+├── bot.py                    # Main entry point — bot class + polling loop
+├── bot/
+│   ├── formatters.py         # Project/job/contest card formatters
+│   └── keyboards.py          # Inline keyboard builders
+├── core/
+│   ├── config.py             # Environment config + constants
+│   ├── tg_api.py             # Telegram Bot API async wrappers
+│   └── cache.py              # In-memory cache classes
+├── tracking/
+│   ├── seen.py               # Generic SeenTracker (persistent ID tracking)
+│   ├── monitor.py            # Generic MonitorConfig (per-category toggles)
+│   └── digest.py             # Daily project digest
+├── intel/
+│   ├── budget.py             # Budget comparison intelligence
+│   └── clients.py            # Client reputation tracking
 ├── scraper.py                # Projects.co.id scraping engine
 ├── fastwork_scraper.py       # Fastwork.id REST API client
 ├── sribu_scraper.py          # Sribu.com GraphQL client

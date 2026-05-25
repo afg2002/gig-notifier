@@ -1,22 +1,61 @@
 """
-Interactive Telegram Bot for projects.co.id project notifications.
-Features:
-- Browse projects by category with inline keyboards
-- Pagination (10-15 projects per page)
-- Per-category monitoring configuration
-- Real-time notifications for new projects
-- Beautiful emoji UI
+Gig Notifier — Telegram bot for freelance project monitoring.
+
+Monitors Projects.co.id, Fastwork.id, and Sribu.com with real-time notifications,
+category browsing via inline keyboards, per-category monitoring, budget intelligence,
+client reputation tracking, and daily digest.
+
+Run:
+    python bot.py
 """
-
-import os
-import sys
-import json
-import logging
 import asyncio
-import fcntl
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
+import logging
 
+# ── Core ──
+from core.config import (
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    POLL_INTERVAL_SECONDS,
+    PROJECTS_PER_PAGE,
+    DATA_DIR,
+    SEEN_FILE,
+    MONITOR_FILE,
+    FW_SEEN_FILE,
+    FW_MONITOR_FILE,
+    SRIBU_SEEN_FILE,
+    SRIBU_MONITOR_FILE,
+    get_chat_ids,
+)
+
+from core.tg_api import (
+    tg_request,
+    send_message,
+    broadcast,
+    edit_message,
+    answer_callback,
+)
+
+from core.cache import ProjectCache, FastworkJobCache, SribuContestCache
+
+# ── Tracking ──
+from tracking.seen import SeenTracker
+from tracking.monitor import MonitorConfig
+from tracking.digest import (
+    record_digest_project,
+    get_daily_digest_text,
+)
+
+# ── Intel ──
+from intel.budget import (
+    update_budget_stats,
+    get_budget_comparison,
+)
+from intel.clients import (
+    update_client_stats,
+    get_client_reputation,
+)
+
+# ── Scrapers ──
 from scraper import (
     scrape_listing,
     CATEGORIES,
@@ -40,1080 +79,36 @@ from sribu_scraper import (
     scrape_detail_budget,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+# ── Bot UI ──
+from bot.formatters import (
+    format_project_card,
+    format_project_list,
+    format_monitor_status,
+    format_sribu_contest_card,
+    format_sribu_contests_list,
+    format_fastwork_job_card,
+    format_fastwork_jobs_list,
+    format_fastwork_jobs_notification,
+    _truncate,
+    _is_published_today,
+    _build_sribu_detail_keyboard,
+    _build_fastwork_detail_keyboard,
 )
+
+from bot.keyboards import (
+    build_main_menu_keyboard,
+    build_platform_submenu,
+    build_category_keyboard,
+    build_project_list_keyboard,
+    build_monitor_keyboard,
+    build_fastwork_monitor_keyboard,
+)
+
 logger = logging.getLogger(__name__)
 
-# Config
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL", "300"))  # default 5 min
-PROJECTS_PER_PAGE = int(os.getenv("PROJECTS_PER_PAGE", "10"))
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
-SEEN_FILE = os.path.join(DATA_DIR, "seen_projects.json")
-MONITOR_FILE = os.path.join(DATA_DIR, "monitor_config.json")
-FW_SEEN_FILE = os.path.join(DATA_DIR, "fastwork_seen.json")
-FW_MONITOR_FILE = os.path.join(DATA_DIR, "fastwork_monitor.json")
-SRIBU_SEEN_FILE = os.path.join(DATA_DIR, "sribu_seen.json")
-SRIBU_MONITOR_FILE = os.path.join(DATA_DIR, "sribu_monitor.json")
-
-os.makedirs(DATA_DIR, exist_ok=True)
-
-
-def get_chat_ids() -> list[str]:
-    """Parse TELEGRAM_CHAT_ID env var (comma-separated) into a list of chat IDs."""
-    raw = os.getenv("TELEGRAM_CHAT_ID", "")
-    if not raw:
-        return []
-    return [cid.strip() for cid in raw.split(",") if cid.strip()]
-
-# Telegram API base
-TG_API = "https://api.telegram.org/bot"
-
-
 # ============================================================
-# Data Persistence
+# ProjectsBot — Main bot class
 # ============================================================
-
-
-class SeenTracker:
-    """Persistently tracks which project IDs have been notified."""
-
-    def __init__(self, data_file: str):
-        self.data_file = data_file
-        self.seen_ids: set[str] = set()
-        self._load()
-
-    def _load(self):
-        if os.path.exists(self.data_file):
-            with open(self.data_file, "r") as f:
-                self.seen_ids = set(json.load(f))
-            logger.info(f"Loaded {len(self.seen_ids)} seen project IDs")
-
-    def _save(self):
-        with open(self.data_file, "w") as f:
-            json.dump(list(self.seen_ids), f, indent=2)
-
-    def is_seen(self, project_id: str) -> bool:
-        return project_id in self.seen_ids
-
-    def mark_seen(self, project_id: str):
-        self.seen_ids.add(project_id)
-        self._save()
-
-
-class FastworkSeenTracker:
-    """Persistently tracks which Fastwork job IDs have been notified."""
-
-    def __init__(self, data_file: str):
-        self.data_file = data_file
-        self.seen_ids: set[str] = set()
-        self._load()
-
-    def _load(self):
-        if os.path.exists(self.data_file):
-            with open(self.data_file, "r") as f:
-                self.seen_ids = set(json.load(f))
-            logger.info(f"Loaded {len(self.seen_ids)} seen Fastwork job IDs")
-
-    def _save(self):
-        with open(self.data_file, "w") as f:
-            json.dump(list(self.seen_ids), f, indent=2)
-
-    def is_seen(self, job_id: str) -> bool:
-        return job_id in self.seen_ids
-
-    def mark_seen(self, job_id: str):
-        self.seen_ids.add(job_id)
-        self._save()
-
-
-class FastworkMonitorConfig:
-    """Manages per-category Fastwork monitoring configuration."""
-
-    def __init__(self, data_file: str):
-        self.data_file = data_file
-        self.monitored_tags: set[str] = set()  # tag IDs
-        self._load()
-
-    def _load(self):
-        if os.path.exists(self.data_file):
-            with open(self.data_file, "r") as f:
-                data = json.load(f)
-                self.monitored_tags = set(data.get("monitored_tags", []))
-            logger.info(f"Loaded Fastwork monitor config: {len(self.monitored_tags)} tags")
-        else:
-            # Default: monitor all popular categories
-            self.monitored_tags = {
-                "3327d5e5-7b28-45c8-b552-9da38b3d585d",  # Pengembangan Aplikasi
-                "eb7276d1-1b83-454e-83e6-c1ee68f80c0a",  # Pengembangan Website
-                "a880a9d4-fe0c-4fad-908c-ca4050c5ebea",  # Pemasaran
-                "81f7bcc2-1694-400c-87ec-055243de0e48",  # Bisnis & Keuangan
-                "28956f70-de0f-4333-8da6-f8307489c5b5",  # Desain Grafis
-            }
-            self._save()
-
-    def _save(self):
-        with open(self.data_file, "w") as f:
-            json.dump({"monitored_tags": list(self.monitored_tags)}, f, indent=2)
-
-    def is_monitored(self, tag_id: str) -> bool:
-        return tag_id in self.monitored_tags
-
-    def toggle(self, tag_id: str):
-        if tag_id in self.monitored_tags:
-            self.monitored_tags.discard(tag_id)
-        else:
-            self.monitored_tags.add(tag_id)
-        self._save()
-
-
-class SribuSeenTracker:
-    """Persistently tracks which Sribu contest IDs have been notified."""
-
-    def __init__(self, data_file: str):
-        self.data_file = data_file
-        self.seen_ids: set[str] = set()
-        self._load()
-
-    def _load(self):
-        if os.path.exists(self.data_file):
-            with open(self.data_file, "r") as f:
-                self.seen_ids = set(json.load(f))
-            logger.info(f"Loaded {len(self.seen_ids)} seen Sribu contest IDs")
-
-    def _save(self):
-        with open(self.data_file, "w") as f:
-            json.dump(list(self.seen_ids), f, indent=2)
-
-    def is_seen(self, contest_id: str) -> bool:
-        return contest_id in self.seen_ids
-
-    def mark_seen(self, contest_id: str):
-        self.seen_ids.add(contest_id)
-        self._save()
-
-
-class SribuMonitorConfig:
-    """Manages per-category Sribu monitoring configuration."""
-
-    def __init__(self, data_file: str):
-        self.data_file = data_file
-        self.monitored_categories: set[str] = set()
-        self._load()
-
-    def _load(self):
-        if os.path.exists(self.data_file):
-            with open(self.data_file, "r") as f:
-                data = json.load(f)
-                self.monitored_categories = set(data.get("categories", []))
-            logger.info(f"Loaded Sribu monitor config: {len(self.monitored_categories)} categories")
-        else:
-            # Default: monitor website & programming + logo & branding
-            self.monitored_categories = {
-                "f9e36e5f-d6f9-4c1a-b5d4-e9f8c8a3b7d2",  # Website & Programming
-                "1ef818a5-3a17-4dd1-80e2-685cf3da5946",  # Logo & Branding
-            }
-            self._save()
-
-    def _save(self):
-        with open(self.data_file, "w") as f:
-            json.dump({"categories": list(self.monitored_categories)}, f, indent=2)
-
-    def is_monitored(self, category_id: str) -> bool:
-        return category_id in self.monitored_categories
-
-    def toggle(self, category_id: str):
-        if category_id in self.monitored_categories:
-            self.monitored_categories.discard(category_id)
-        else:
-            self.monitored_categories.add(category_id)
-        self._save()
-
-
-class MonitorConfig:
-    """Manages per-category monitoring configuration."""
-
-    def __init__(self, data_file: str):
-        self.data_file = data_file
-        self.monitored_categories: set[str] = set()
-        self._load()
-
-    def _load(self):
-        if os.path.exists(self.data_file):
-            with open(self.data_file, "r") as f:
-                data = json.load(f)
-                self.monitored_categories = set(data.get("categories", []))
-            logger.info(f"Loaded monitor config: {self.monitored_categories}")
-
-    def _save(self):
-        with open(self.data_file, "w") as f:
-            json.dump({"categories": list(self.monitored_categories)}, f, indent=2)
-
-    def is_monitored(self, category_id: str) -> bool:
-        return category_id in self.monitored_categories
-
-    def toggle(self, category_id: str) -> bool:
-        """Toggle monitoring for a category. Returns new state."""
-        if category_id in self.monitored_categories:
-            self.monitored_categories.discard(category_id)
-            self._save()
-            return False
-        else:
-            self.monitored_categories.add(category_id)
-            self._save()
-            return True
-
-    def is_monitored(self, category_id: str) -> bool:
-        return category_id in self.monitored_categories
-
-
-# ============================================================
-# Competitive Intel: Budget Comparison
-# ============================================================
-
-import re
-
-BUDGET_FILE = os.path.join(DATA_DIR, "category_budget_stats.json")
-
-
-def _parse_budget(budget_str: str) -> float | None:
-    """Extract numeric budget value from string like 'Rp 500.000 - 1.000.000' or 'Rp 500rb'."""
-    if not budget_str or budget_str == "-":
-        return None
-    # Take first number found
-    nums = re.findall(r"[\d']+\.?\d*", budget_str.replace(".", "").replace("'", ""))
-    if not nums:
-        return None
-    try:
-        val = float("".join(nums[:3]))  # take up to 3 digit groups
-        # Handle "500rb" -> 500000
-        if "rb" in budget_str.lower() and val < 10000:
-            val *= 1000
-        return val
-    except ValueError:
-        return None
-
-
-def _load_budget_stats() -> dict:
-    if os.path.exists(BUDGET_FILE):
-        with open(BUDGET_FILE) as f:
-            return json.load(f)
-    return {}
-
-
-def _save_budget_stats(stats: dict):
-    with open(BUDGET_FILE, "w") as f:
-        json.dump(stats, f, indent=2)
-
-
-def update_budget_stats(project: Project):
-    """Update rolling budget stats when new project is scraped."""
-    if not project.budget or project.budget == "-":
-        return
-    stats = _load_budget_stats()
-    cat_id = "general"
-    budget_val = _parse_budget(project.budget)
-    if not budget_val:
-        return
-
-    if cat_id not in stats:
-        stats[cat_id] = {"values": [], "count": 0}
-    stats[cat_id]["values"].append(budget_val)
-    stats[cat_id]["count"] += 1
-    # Keep rolling window of last 100 values
-    if len(stats[cat_id]["values"]) > 100:
-        stats[cat_id]["values"] = stats[cat_id]["values"][-100:]
-    _save_budget_stats(stats)
-
-
-def get_budget_comparison(budget_str: str) -> str:
-    """Return emoji + text comparing budget to rolling category average."""
-    val = _parse_budget(budget_str)
-    if not val:
-        return ""
-    stats = _load_budget_stats()
-    general = stats.get("general", {"values": []})
-    if not general["values"]:
-        return ""
-    avg = sum(general["values"]) / len(general["values"])
-    ratio = val / avg if avg > 0 else 1.0
-    if ratio >= 1.5:
-        return f"💎 <b>Above avg {ratio:.1f}x!</b>"
-    elif ratio >= 1.2:
-        return f"✅ Above avg ({ratio:.1f}x)"
-    elif ratio >= 0.8:
-        return f"📊 ~avg"
-    else:
-        return f"⚠️ Below avg ({ratio:.1f}x)"
-
-
-# ============================================================
-# Client Reputation Tracker
-# ============================================================
-
-CLIENT_FILE = os.path.join(DATA_DIR, "client_stats.json")
-
-
-def _load_client_stats() -> dict:
-    if os.path.exists(CLIENT_FILE):
-        with open(CLIENT_FILE) as f:
-            return json.load(f)
-    return {}
-
-
-def _save_client_stats(stats: dict):
-    with open(CLIENT_FILE, "w") as f:
-        json.dump(stats, f, indent=2)
-
-
-def update_client_stats(project: Project):
-    """Record project from a client owner."""
-    if not project.owner_name or project.owner_name == "Unknown":
-        return
-    stats = _load_client_stats()
-    key = project.owner_name
-    if key not in stats:
-        stats[key] = {
-            "project_count": 0,
-            "total_budget": 0.0,
-            "projects": [],
-            "first_seen": project.published_date or "",
-            "last_seen": "",
-        }
-    stats[key]["project_count"] += 1
-    bval = _parse_budget(project.budget) or 0
-    if bval > 0:
-        stats[key]["total_budget"] += bval
-    stats[key]["last_seen"] = project.published_date or ""
-    # Keep last 20 projects per client
-    stats[key]["projects"].append({
-        "id": project.project_id,
-        "title": project.title[:60],
-        "budget": project.budget,
-        "date": project.published_date or "",
-    })
-    if len(stats[key]["projects"]) > 20:
-        stats[key]["projects"] = stats[key]["projects"][-20:]
-    _save_client_stats(stats)
-
-
-def get_client_reputation(owner_name: str) -> str:
-    """Return emoji + short reputation line for client."""
-    if not owner_name or owner_name == "Unknown":
-        return "❓ New client"
-    stats = _load_client_stats()
-    client = stats.get(owner_name)
-    if not client:
-        return "❓ New client"
-    count = client["project_count"]
-    avg_budget = (client["total_budget"] / count) if count > 0 and client["total_budget"] > 0 else 0
-    if count >= 10:
-        return f"🏆 Veteran ({count} projects, avg {avg_budget:,.0f})"
-    elif count >= 5:
-        return f"⭐ Regular ({count} projects)"
-    else:
-        return f"👤 Known ({count} project{'s' if count > 1 else ''})"
-
-
-# ============================================================
-# Daily Digest Tracker
-# ============================================================
-
-DIGEST_FILE = os.path.join(DATA_DIR, "daily_digest.json")
-
-
-def _load_digest() -> dict:
-    if os.path.exists(DIGEST_FILE):
-        with open(DIGEST_FILE) as f:
-            return json.load(f)
-    return {}
-
-
-def _save_digest(digest: dict):
-    with open(DIGEST_FILE, "w") as f:
-        json.dump(digest, f, indent=2)
-
-
-def _today_key() -> str:
-    return datetime.now().strftime("%Y-%m-%d")
-
-
-def record_digest_project(project: Project, category_name: str):
-    """Record a newly notified project in today's digest."""
-    digest = _load_digest()
-    today = _today_key()
-    if today not in digest:
-        digest[today] = {"projects": [], "sent": False}
-    # Avoid duplicates
-    existing = {p["id"] for p in digest[today]["projects"]}
-    if project.project_id not in existing:
-        budget_val = _parse_budget(project.budget) or 0
-        digest[today]["projects"].append({
-            "id": project.project_id,
-            "title": project.title[:80],
-            "description": project.description[:200],
-            "budget": project.budget,
-            "budget_val": budget_val,
-            "category": category_name,
-            "bid_count": project.bid_count or "0",
-            "owner": project.owner_name,
-            "link": project.link,
-            "published": project.published_date or "",
-        })
-    _save_digest(digest)
-
-
-def get_daily_digest_text() -> str:
-    """Build formatted digest message for today."""
-    digest = _load_digest()
-    today = _today_key()
-    today_data = digest.get(today, {"projects": []})
-    projects = today_data.get("projects", [])
-
-    if not projects:
-        return None
-
-    # Group by category
-    by_cat: dict[str, list] = {}
-    for p in projects:
-        cat = p["category"]
-        if cat not in by_cat:
-            by_cat[cat] = []
-        by_cat[cat].append(p)
-
-    lines = [
-        f"📊 <b>Daily Digest</b> — {today}\n",
-        f"🆕 {len(projects)} project baru hari ini\n",
-    ]
-
-    for cat, projs in by_cat.items():
-        lines.append(f"\n{cat}:")
-        for p in projs[:5]:
-            bids = int(p["bid_count"]) if p["bid_count"].isdigit() else 0
-            bid_emoji = "🔥" if bids > 20 else "👥" if bids > 5 else "🆕"
-            budget_cmp = get_budget_comparison(p["budget"])
-            cmp_txt = f" {budget_cmp}" if budget_cmp else ""
-            lines.append(
-                f"  ▸ {p['title']}\n"
-                f"    💰 {p['budget']}{cmp_txt}  •  {bid_emoji} {p['bid_count']} bids"
-            )
-
-    return "\n".join(lines)
-# Telegram API Helpers
-# ============================================================
-
-
-async def tg_request(token: str, method: str, payload: dict) -> dict:
-    """Make a request to Telegram Bot API using stdlib urllib."""
-    import urllib.request
-    import urllib.error
-
-    url = f"{TG_API}{token}/{method}"
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": "TelegramBot/1.0",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        try:
-            return json.loads(e.read().decode())
-        except Exception:
-            return {"ok": False, "error_code": e.code, "description": f"HTTP {e.code}"}
-    except Exception as e:
-        logger.error(f"Telegram request error: {e}")
-        return {"ok": False, "error": str(e)}
-
-
-async def send_message(
-    token: str,
-    chat_id: str,
-    text: str,
-    reply_markup: dict | None = None,
-    parse_mode: str = "HTML",
-) -> dict:
-    """Send a message with optional inline keyboard.
-
-    When chat_id equals TELEGRAM_CHAT_ID (which may contain comma-separated IDs),
-    automatically broadcasts to all configured chat IDs.
-    """
-    # Check if this is the broadcast target (env var)
-    broadcast_ids = get_chat_ids()
-    target_ids = [cid.strip() for cid in chat_id.split(",") if cid.strip()]
-
-    # If the target matches the env var pattern, broadcast to all
-    if chat_id == TELEGRAM_CHAT_ID and len(broadcast_ids) > 1:
-        results = []
-        for cid in broadcast_ids:
-            payload = {
-                "chat_id": cid,
-                "text": text,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": True,
-            }
-            if reply_markup:
-                payload["reply_markup"] = json.dumps(reply_markup)
-            try:
-                result = await tg_request(token, "sendMessage", payload)
-                if not result.get("ok"):
-                    logger.error(f"Telegram broadcast error to {cid}: {result}")
-                results.append(result.get("ok", False))
-            except Exception as e:
-                logger.error(f"Failed to send to {cid}: {e}")
-                results.append(False)
-            await asyncio.sleep(0.3)
-        return {"ok": all(results), "broadcast": True, "results": results}
-
-    # Single recipient
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True,
-    }
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
-
-    result = await tg_request(token, "sendMessage", payload)
-    if not result.get("ok"):
-        logger.error(f"Telegram API error: {result}")
-    return result
-
-
-async def broadcast(token: str, chat_ids: list[str], text: str, reply_markup: dict | None = None, parse_mode: str = "HTML") -> dict:
-    """Send a message to multiple chat IDs. Returns aggregated results."""
-    results = []
-    for chat_id in chat_ids:
-        try:
-            result = await send_message(token, chat_id, text, reply_markup, parse_mode)
-            results.append({"chat_id": chat_id, "ok": result.get("ok", False)})
-        except Exception as e:
-            logger.error(f"Failed to send to {chat_id}: {e}")
-            results.append({"chat_id": chat_id, "ok": False, "error": str(e)})
-        await asyncio.sleep(0.3)
-    return {"ok": True, "results": results}
-
-
-async def edit_message(
-    token: str,
-    chat_id: int,
-    message_id: int,
-    text: str,
-    reply_markup: dict | None = None,
-    parse_mode: str = "HTML",
-) -> dict:
-    """Edit an existing message."""
-    payload = {
-        "chat_id": chat_id,
-        "message_id": message_id,
-        "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True,
-    }
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
-
-    result = await tg_request(token, "editMessageText", payload)
-    if not result.get("ok"):
-        logger.error(f"Telegram API edit error: {result}")
-    return result
-
-
-async def answer_callback(token: str, callback_query_id: str, text: str = "") -> dict:
-    """Answer a callback query (show popup notification)."""
-    payload = {
-        "callback_query_id": callback_query_id,
-    }
-    if text:
-        payload["text"] = text
-    return await tg_request(token, "answerCallbackQuery", payload)
-
-
-# ============================================================
-# Message Formatters
-# ============================================================
-
-
-def format_project_card(project: Project, index: int = 0) -> str:
-    """Format a single project as a beautiful card with emojis."""
-    weekly_emoji = "✅" if project.need_weekly_report == "Yes" else "❌"
-    bid_count = int(project.bid_count) if project.bid_count.isdigit() else 0
-    bid_emoji = "🔥" if bid_count > 20 else "👥" if bid_count > 5 else "🆕"
-
-    card = (
-        f"{'─' * 30}\n"
-        f"<b>#{index + 1} {project.title}</b>\n\n"
-        f"📝 <i>{_truncate(project.description, 300)}</i>\n\n"
-        f"💰 <b>Budget:</b> {project.budget or '-'}\n"
-        f"📅 <b>Published:</b> {project.published_date or '-'}\n"
-        f"⏰ <b>Deadline:</b> {project.deadline or '-'}\n"
-        f"📆 <b>Finish:</b> {project.finish_days or '-'} hari\n"
-        f"📊 <b>Status:</b> {project.status or '-'}\n"
-        f"{bid_emoji} <b>Bids:</b> {project.bid_count or '0'}\n"
-        f"📄 <b>Weekly Report:</b> {weekly_emoji} {project.need_weekly_report}\n"
-    )
-
-    if project.tags:
-        card += f"🏷️ <b>Tags:</b> {', '.join(project.tags)}\n"
-
-    card += f"👤 <b>Owner:</b> {project.owner_name}\n"
-
-    return card
-
-
-def format_project_list(
-    projects: list[Project], category: dict, page: int, total_pages: int,
-    start_index: int = 0
-) -> str:
-    """Format a paginated list of projects."""
-    cat_emoji = category.get("emoji", "📋")
-    cat_name = category.get("name", "All")
-
-    header = (
-        f"{cat_emoji} <b>{cat_name}</b> — Page {page}/{total_pages}\n"
-        f"📊 {len(projects)} projects ditemukan\n"
-    )
-
-    items = []
-    for i, p in enumerate(projects):
-        bid_count = int(p.bid_count) if p.bid_count and p.bid_count.isdigit() else 0
-        bid_emoji = "🔥" if bid_count > 20 else "👥" if bid_count > 5 else "🆕"
-        budget_short = p.budget or "N/A"
-        items.append(
-            f"<b>#{start_index + i + 1}</b> {p.title}\n"
-            f"   💰 {budget_short}\n"
-            f"   {bid_emoji} {p.bid_count or '0'} bids  •  "
-            f"📅 {p.published_date or '-'}"
-        )
-
-    return header + "\n\n".join(items)
-
-
-def format_monitor_status(monitor: MonitorConfig) -> str:
-    """Format monitoring configuration status."""
-    lines = ["🔔 <b>Monitoring Configuration</b>\n"]
-
-    for cat in CATEGORIES:
-        status = "✅ ON" if monitor.is_monitored(cat["id"]) else "⬜ OFF"
-        lines.append(f"{cat['emoji']} {cat['name']}: <b>{status}</b>")
-
-    lines.append(
-        f"\n{'─' * 30}\n"
-        f"⏱️ Polling interval: <b>{POLL_INTERVAL_SECONDS}s</b>\n"
-        f"📊 Monitored: <b>{len(monitor.monitored_categories)}</b> categories"
-    )
-
-    return "\n".join(lines)
-
-
-def _truncate(text: str, max_len: int) -> str:
-    """Truncate text to max length."""
-    if not text:
-        return ""
-    if len(text) <= max_len:
-        return text
-    return text[:max_len].rsplit(" ", 1)[0] + "..."
-
-
-def _is_published_today(published_date: str) -> bool:
-    """Check if a project was published today.
-    Expected format: 'DD/MM/YYYY HH:MM:SS WIB'"""
-    if not published_date:
-        return False
-    try:
-        date_part = published_date.split(" ")[0]  # "05/04/2026"
-        day, month, year = date_part.split("/")
-        from datetime import date
-
-        pub_date = date(int(year), int(month), int(day))
-        return pub_date == date.today()
-    except (ValueError, IndexError):
-        return False
-
-
-# ============================================================
-# Inline Keyboard Builders
-# ============================================================
-
-
-def build_main_menu_keyboard() -> dict:
-    """Build the main menu inline keyboard — source selector."""
-    return {
-        "inline_keyboard": [
-            [{"text": "🌐 Projects.co.id", "callback_data": "src:projects"}],
-            [{"text": "⚡ Fastwork.id", "callback_data": "src:fastwork"}],
-            [{"text": "🎨 Sribu.com", "callback_data": "src:sribu"}],
-            [{"text": "🔙 Back", "callback_data": "menu:back"}],
-        ]
-    }
-
-
-def build_platform_submenu(source: str) -> dict:
-    """Build sub-menu for a specific platform."""
-    if source == "projects":
-        return {
-            "inline_keyboard": [
-                [{"text": "📋 Browse Projects", "callback_data": "menu:browse"}],
-                [{"text": "🔔 Monitor Settings", "callback_data": "menu:monitor"}],
-                [{"text": "🔄 Refresh Now", "callback_data": "menu:refresh"}],
-                [{"text": "ℹ️ Help", "callback_data": "menu:help"}],
-                [{"text": "🔙 Back to Sources", "callback_data": "src:back"}],
-            ]
-        }
-    elif source == "fastwork":
-        return {
-            "inline_keyboard": [
-                [{"text": "📋 Browse Fastwork Jobs", "callback_data": "fw:browse"}],
-                [{"text": "🔔 Monitor Fastwork", "callback_data": "fw:monitor"}],
-                [{"text": "🔄 Refresh Fastwork", "callback_data": "fw:refresh"}],
-                [{"text": "🔙 Back to Sources", "callback_data": "src:back"}],
-            ]
-        }
-    elif source == "sribu":
-        return {
-            "inline_keyboard": [
-                [{"text": "📋 Browse Contests", "callback_data": "sribu:browse"}],
-                [{"text": "🔔 Monitor Sribu", "callback_data": "sribu:monitor"}],
-                [{"text": "🔄 Refresh Sribu", "callback_data": "sribu:refresh"}],
-                [{"text": "🔙 Back to Sources", "callback_data": "src:back"}],
-            ]
-        }
-
-
-def build_category_keyboard() -> dict:
-    """Build category selection keyboard (2 columns)."""
-    buttons = []
-    row = []
-    for cat in CATEGORIES:
-        row.append(
-            {
-                "text": f"{cat['emoji']} {cat['name']}",
-                "callback_data": f"cat:{cat['id']}",
-            }
-        )
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-
-    buttons.append([{"text": "🔙 Back to Menu", "callback_data": "menu:back"}])
-
-    return {"inline_keyboard": buttons}
-
-
-def build_project_list_keyboard(category_id: str, page: int, total_pages: int) -> dict:
-    """Build pagination + project detail keyboard."""
-    buttons = []
-
-    # Pagination row
-    nav_row = []
-    if page > 1:
-        nav_row.append(
-            {"text": "⬅️ Prev", "callback_data": f"page:{category_id}:{page - 1}"}
-        )
-    nav_row.append({"text": f"📄 {page}/{total_pages}", "callback_data": "noop"})
-    if page < total_pages:
-        nav_row.append(
-            {"text": "Next ➡️", "callback_data": f"page:{category_id}:{page + 1}"}
-        )
-    buttons.append(nav_row)
-
-    # Project detail buttons (show first 5)
-    # We use project index as identifier
-    # Note: We'll store projects in memory for callback resolution
-
-    buttons.append([{"text": "🔙 Categories", "callback_data": f"catlist"}])
-    buttons.append([{"text": "🏠 Main Menu", "callback_data": "menu:back"}])
-
-    return {"inline_keyboard": buttons}
-
-
-def build_monitor_keyboard(monitor: MonitorConfig) -> dict:
-    """Build monitoring toggle keyboard."""
-    buttons = []
-    row = []
-    for cat in CATEGORIES:
-        is_on = monitor.is_monitored(cat["id"])
-        status = "✅" if is_on else "⬜"
-        row.append(
-            {
-                "text": f"{status} {cat['emoji']} {cat['name']}",
-                "callback_data": f"mon:{cat['id']}",
-            }
-        )
-        if len(row) == 1:  # 1 column for readability
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-
-    buttons.append([{"text": "🔙 Back to Menu", "callback_data": "menu:back"}])
-
-    return {"inline_keyboard": buttons}
-
-
-def build_fastwork_monitor_keyboard(fw_monitor: FastworkMonitorConfig) -> dict:
-    """Build Fastwork monitoring toggle keyboard."""
-    cats = get_fastwork_categories()
-    buttons = []
-    row = []
-    for cat in cats:
-        is_on = fw_monitor.is_monitored(cat["id"])
-        status = "✅" if is_on else "⬜"
-        row.append({
-            "text": f"{status} {cat['name']}",
-            "callback_data": f"fwmon:{cat['id']}",
-        })
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-
-    buttons.append([{"text": "🔙 Back to Fastwork", "callback_data": "src:fastwork"}])
-
-    return {"inline_keyboard": buttons}
-
-
-# ============================================================
-# Sribu Message Formatters
-# ============================================================
-
-
-def _build_sribu_detail_keyboard(contest: SribuContest) -> dict:
-    """Build a keyboard with a View button for a Sribu contest."""
-    return {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "🔗 View Contest",
-                    "url": contest.contest_url,
-                }
-            ],
-            [
-                {"text": "🔙 Back to Contests", "callback_data": "sribu_cat:all:1"},
-            ],
-        ]
-    }
-
-
-def format_sribu_contest_card(contest: SribuContest, index: int = 0) -> str:
-    """Format a single Sribu contest as a detailed card."""
-    tags_str = ", ".join(contest.tags[:5]) if contest.tags else "-"
-    budget_str = contest.budget or contest.budget_raw or "Scraping..."
-
-    card_lines = [
-        f"🎨 <b>#{index + 1} {contest.title}</b>\n",
-        f"📝 <i>{_truncate(contest.description, 300) if contest.description else '(Tidak ada deskripsi)'}</i>\n",
-        f"💰 <b>Budget:</b> {budget_str}\n",
-        f"📂 <b>Kategori:</b> {contest.category_emoji} {contest.category_name}\n",
-        f"📅 <b>Deadline:</b> {contest.deadline_formatted}\n",
-        f"📊 <b>Status:</b> {contest.status_label}\n",
-    ]
-
-    if tags_str and tags_str != "-":
-        card_lines.append(f"🏷️ <b>Tags:</b> {tags_str}\n")
-
-    return "".join(card_lines)
-
-
-def format_sribu_contests_list(
-    contests: list[SribuContest], category: str, page: int, total_pages: int,
-    start_index: int = 0
-) -> str:
-    """Format a paginated list of Sribu contests."""
-    header = (
-        f"🎨 <b>{category}</b> — Page {page}/{total_pages}\n"
-        f"📊 {len(contests)} contests ditemukan\n"
-    )
-
-    items = []
-    for i, c in enumerate(contests):
-        budget_str = c.budget or c.budget_raw or "-"
-        items.append(
-            f"<b>#{start_index + i + 1}</b> {c.title}\n"
-            f"   💰 {budget_str}  •  📅 {c.deadline_formatted}  •  "
-            f"{c.category_emoji} {c.category_name}\n"
-            f"   📊 {c.status_label}  •  🏷️ {', '.join(c.tags[:2]) if c.tags else '-'}\n"
-        )
-
-    return header + "\n\n".join(items)
-
-
-# ============================================================
-# Fastwork Message Formatters
-# ============================================================
-
-
-def _truncate(text: str, length: int) -> str:
-    """Truncate text to length chars, adding ellipsis if needed."""
-    if not text:
-        return ""
-    return text[:length] + ("..." if len(text) > length else "")
-
-
-def _build_fastwork_detail_keyboard(job: FastworkJob) -> dict:
-    """Build a keyboard with a View button for a Fastwork job."""
-    return {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "🔗 View Full Job",
-                    "url": job.link,
-                }
-            ],
-            [
-                {"text": "🔙 Back to Jobs", "callback_data": f"fwcat:{job.tag_id}:1"}
-            ],
-        ]
-    }
-
-
-def format_fastwork_job_card(job: FastworkJob, index: int = 0) -> str:
-    """Format a single Fastwork job as a detailed card (matching Projects.co.id style)."""
-    offers_emoji = "🔥" if job.offers_count > 10 else "👥" if job.offers_count > 0 else "🆕"
-    type_emoji = "💻" if job.type == "freelance" else "⏰" if job.type == "contract" else "🌐"
-
-    # Status badge
-    status_map = {
-        "open": "🟢 Open",
-        "closed": "🔴 Closed",
-        "in_progress": "🟡 In Progress",
-        "completed": "✅ Completed",
-    }
-    status_text = status_map.get(job.status.lower() if job.status else "", f"📊 {job.status}") if job.status else "📊 Unknown"
-
-    card_lines = [
-        f"⚡ <b>#{index + 1} {job.title}</b>\n",
-        f"📝 <i>{_truncate(job.description, 300)}</i>\n",
-        f"💰 <b>Budget:</b> {job.budget}\n",
-        f"📂 <b>Category:</b> {job.tag_name}\n",
-        f"🏷️ <b>Type:</b> {type_emoji} {job.type.capitalize() if job.type else '-'}\n",
-        f"📅 <b>Published:</b> {job.published_date}\n",
-        f"📊 <b>Status:</b> {status_text}\n",
-        f"{offers_emoji} <b>Offers:</b> {job.offers_count}\n",
-    ]
-
-    if job.skills:
-        skills_str = ", ".join(job.skills[:8])
-        if len(job.skills) > 8:
-            skills_str += f" +{len(job.skills) - 8} more"
-        card_lines.append(f"🛠️ <b>Skills:</b> {skills_str}\n")
-
-    if job.client_name:
-        card_lines.append(f"👤 <b>Client:</b> {job.client_name}\n")
-
-    return "".join(card_lines)
-
-
-def format_fastwork_jobs_list(
-    jobs: list[FastworkJob], category: str, page: int, total_pages: int,
-    start_index: int = 0
-) -> str:
-    """Format a paginated list of Fastwork jobs (matching Projects.co.id list style)."""
-    header = (
-        f"⚡ <b>{category}</b> — Page {page}/{total_pages}\n"
-        f"📊 {len(jobs)} jobs ditemukan\n"
-    )
-
-    items = []
-    for i, job in enumerate(jobs):
-        offers_emoji = "🔥" if job.offers_count > 10 else "👥" if job.offers_count > 0 else "🆕"
-        type_emoji = "💻" if job.type == "freelance" else "⏰" if job.type == "contract" else "🌐"
-        budget_short = job.budget or "N/A"
-        items.append(
-            f"<b>#{start_index + i + 1}</b> {job.title}\n"
-            f"   💰 {budget_short}  •  {type_emoji} {job.type or '-'}  •  "
-            f"{offers_emoji} {job.offers_count} offers\n"
-            f"   📂 {job.tag_name}  •  📅 {job.published_date}"
-        )
-
-    return header + "\n\n".join(items)
-
-
-def format_fastwork_jobs_notification(jobs: list[FastworkJob], category: str = None) -> str:
-    """Format a Fastwork notification message for new jobs (rich card style)."""
-    cat_emoji = "⚡"
-    lines = [
-        f"⚡ <b>{len(jobs)} Fastwork Job Baru</b>"
-        f"{f' di {category}' if category else ''}!\n\n"
-    ]
-    for i, job in enumerate(jobs[:5]):
-        lines.append(format_fastwork_job_card(job, i))
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-# Project Cache (for pagination callbacks)
-# ============================================================
-
-
-class FastworkJobCache:
-    """Cache Fastwork jobs per tag+page for detail view resolution."""
-
-    def __init__(self):
-        self._cache: dict[str, list[FastworkJob]] = {}
-
-    def store(self, tag_id: str, page: int, jobs: list[FastworkJob]):
-        key = f"{tag_id}:{page}"
-        self._cache[key] = jobs
-
-    def get(self, tag_id: str, page: int) -> list[FastworkJob]:
-        key = f"{tag_id}:{page}"
-        return self._cache.get(key, [])
-
-    def clear(self):
-        self._cache.clear()
-
-
-class SribuContestCache:
-    """Cache Sribu contests per category+page for detail view resolution."""
-
-    def __init__(self):
-        self._cache: dict[str, list[SribuContest]] = {}
-
-    def store(self, category_id: str, page: int, contests: list[SribuContest]):
-        key = f"{category_id}:{page}"
-        self._cache[key] = contests
-
-    def get(self, category_id: str, page: int) -> list[SribuContest]:
-        key = f"{category_id}:{page}"
-        return self._cache.get(key, [])
-
-
-class ProjectCache:
-    """Cache projects per category+page for callback resolution."""
-
-    def __init__(self):
-        self._cache: dict[str, list[Project]] = {}
-
-    def store(self, category_id: str, page: int, projects: list[Project]):
-        key = f"{category_id}:{page}"
-        self._cache[key] = projects
-
-    def get(self, category_id: str, page: int) -> list[Project]:
-        key = f"{category_id}:{page}"
-        return self._cache.get(key, [])
-
-    def clear(self):
-        self._cache.clear()
-
-
-# ============================================================
-# Bot Handler
-# ============================================================
-
 
 class ProjectsBot:
     """Interactive Telegram bot for projects.co.id."""
@@ -2610,10 +1605,11 @@ class ProjectsBot:
         self._running = False
 
 
-# ============================================================
-# Long Polling Update Fetcher
-# ============================================================
 
+
+# ============================================================
+# Polling & Entry Point
+# ============================================================
 
 async def fetch_updates(token: str, offset: int = 0, timeout: int = 30) -> dict:
     """Fetch updates via long polling using stdlib urllib."""
@@ -2642,6 +1638,7 @@ async def fetch_updates(token: str, offset: int = 0, timeout: int = 30) -> dict:
     except Exception as e:
         logger.error(f"fetch_updates error: {e}")
         return {"ok": False, "result": []}
+
 
 
 async def main():
@@ -2692,3 +1689,4 @@ if __name__ == "__main__":
         sys.exit(1)
 
     asyncio.run(main())
+
