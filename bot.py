@@ -1393,6 +1393,40 @@ class ProjectsBot:
                 cat_id = parts[1]
                 self.sribu_monitor.toggle(cat_id)
                 await self._sribu_monitor(chat_id, message_id, callback_id)
+            elif action == "help":
+                help_action = parts[1] if len(parts) > 1 else "all"
+                if help_action == "back":
+                    # Re-show help menu by editing current message
+                    keyboard = {
+                        "inline_keyboard": [
+                            [{"text": "🌐 Browse Project", "callback_data": "help:browse"},
+                             {"text": "🔔 Monitoring", "callback_data": "help:monitor"}],
+                            [{"text": "📊 Analytics & Intel", "callback_data": "help:analytics"},
+                             {"text": "📝 AI Proposal", "callback_data": "help:proposal"}],
+                            [{"text": "⚔️ Battle Royale", "callback_data": "help:battle"},
+                             {"text": "👻 Ghost Detector", "callback_data": "help:ghost"}],
+                            [{"text": "📡 Skill Radar", "callback_data": "help:radar"},
+                             {"text": "⏰ Bid Timing", "callback_data": "help:timing"}],
+                            [{"text": "📋 SEMUA COMMAND", "callback_data": "help:all"}],
+                        ]
+                    }
+                    await edit_message(
+                        TELEGRAM_BOT_TOKEN, int(chat_id), message_id,
+                        "📖 <b>GIG-NOTIFIER HELP CENTER</b>\n\n"
+                        "Pilih kategori untuk lihat command:\n\n"
+                        "🌐 <b>Browse</b> — Cari project di 3 platform\n"
+                        "🔔 <b>Monitor</b> — Pantau project baru otomatis\n"
+                        "📊 <b>Analytics</b> — Trend, stats, klien top\n"
+                        "📝 <b>AI Proposal</b> — Generate proposal otomatis\n"
+                        "⚔️ <b>Battle</b> — 3 persona proposal bertarung\n"
+                        "👻 <b>Ghost</b> — Deteksi project mencurigakan\n"
+                        "📡 <b>Radar</b> — Skill gap vs market demand\n"
+                        "⏰ <b>Timing</b> — Waktu optimal untuk bid\n\n"
+                        "⬇️ Klik tombol di bawah untuk lihat detail",
+                        reply_markup=keyboard,
+                    )
+                else:
+                    await self._handle_help_callback(chat_id, data, message_id)
         except Exception as e:
             logger.error(f"Callback handler error: {e}")
             await answer_callback(
@@ -1505,48 +1539,142 @@ class ProjectsBot:
                 )
 
     async def _cmd_help(self, chat_id: str):
-        await self._cmd_help_text(chat_id)
-
-    async def _cmd_help_text(self, chat_id: str):
+        """Show interactive help menu with category buttons."""
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🌐 Browse Project", "callback_data": "help:browse"},
+                 {"text": "🔔 Monitoring", "callback_data": "help:monitor"}],
+                [{"text": "📊 Analytics & Intel", "callback_data": "help:analytics"},
+                 {"text": "📝 AI Proposal", "callback_data": "help:proposal"}],
+                [{"text": "⚔️ Battle Royale", "callback_data": "help:battle"},
+                 {"text": "👻 Ghost Detector", "callback_data": "help:ghost"}],
+                [{"text": "📡 Skill Radar", "callback_data": "help:radar"},
+                 {"text": "⏰ Bid Timing", "callback_data": "help:timing"}],
+                [{"text": "📋 SEMUA COMMAND", "callback_data": "help:all"}],
+            ]
+        }
         await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            "📖 <b>GIG-NOTIFIER HELP CENTER</b>\n\n"
+            "Pilih kategori untuk lihat command:\n\n"
+            "🌐 <b>Browse</b> — Cari project di 3 platform\n"
+            "🔔 <b>Monitor</b> — Pantau project baru otomatis\n"
+            "📊 <b>Analytics</b> — Trend, stats, klien top\n"
+            "📝 <b>AI Proposal</b> — Generate proposal otomatis\n"
+            "⚔️ <b>Battle</b> — 3 persona proposal bertarung\n"
+            "👻 <b>Ghost</b> — Deteksi project mencurigakan\n"
+            "📡 <b>Radar</b> — Skill gap vs market demand\n"
+            "⏰ <b>Timing</b> — Waktu optimal untuk bid\n\n"
+            "⬇️ Klik tombol di bawah atau scroll ke /help_all",
+            reply_markup=keyboard,
+        )
+
+    async def _handle_help_callback(self, chat_id: str, callback_id: str, message_id: int):
+        """Handle help submenu callbacks."""
+        sections = {
+            "browse": (
+                "🌐 <b>BROWSE PROJECT</b>\n\n"
+                "/browse — Projects.co.id per kategori\n"
+                "/fw — Fastwork.id jobs\n"
+                "/sribu — Sribu.com contests\n"
+                "/refresh — Cek project baru sekarang\n\n"
+                "💡 <i>Pilih kategori lewat inline keyboard setelah command</i>"
+            ),
+            "monitor": (
+                "🔔 <b>MONITORING</b>\n\n"
+                "/monitor — Atur kategori yg dipantau\n"
+                "/status — Cek status monitoring aktif\n"
+                "/digest — Ringkasan project hari ini\n\n"
+                "💡 <i>Bot auto-notifikasi tiap ada project baru di kategori yg lo monitor</i>"
+            ),
+            "analytics": (
+                "📊 <b>ANALYTICS & INTEL</b>\n\n"
+                "/trends — Trend project per kategori\n"
+                "/topclients — Top 10 client terbanyak\n"
+                "/radar — Skill gap vs CV lo\n"
+                "/timing — Waktu optimal bid\n"
+                "/ghost — Deteksi project mencurigakan\n\n"
+                "💡 <i>/ghost bisa dipake sebelum lo bid — biar gak buang waktu</i>"
+            ),
+            "proposal": (
+                "📝 <b>AI PROPOSAL</b>\n\n"
+                "/proposal [url] — Generate proposal dari URL project\n"
+                "/uploadcv — Upload CV PDF\n"
+                "/mycv — Lihat CV tersimpan\n"
+                "/setprofile — Set profil freelancer\n"
+                "/myprofile — Lihat profil\n\n"
+                "💡 <i>Set profil dulu biar proposal personalized. CV bikin proposal makin akurat.</i>"
+            ),
+            "battle": (
+                "⚔️ <b>PROPOSAL BATTLE ROYALE</b>\n\n"
+                "/battle [judul] | [budget] | [deskripsi]\n"
+                "/personas — Bandingkan 3 persona\n\n"
+                "🔥 <b>Si Agresif</b> — Harga miring, timeline ngebut\n"
+                "💎 <b>Si Premium</b> — Kualitas tinggi, harga premium\n"
+                "🤓 <b>Si Teknis</b> — Detail arsitektur, tech stack solid\n\n"
+                "💡 <i>Pilih persona sesuai client. Agresif buat project kecil, Premium buat corporate.</i>"
+            ),
+            "ghost": (
+                "👻 <b>GHOST DETECTOR</b>\n\n"
+                "/ghost [judul] | [budget] | [deskripsi]\n\n"
+                "Score 0-100 — makin tinggi makin ghost:\n"
+                "✅ 0-20: Project legit\n"
+                "🙂 20-40: Low risk\n"
+                "🤔 40-60: Perlu due diligence\n"
+                "😱 60-80: High risk — waspada\n"
+                "👻 80-100: POLTERGEIST — hampir pasti ghosting\n\n"
+                "💡 <i>Deteksi pola: budget gak masuk akal, client baru, deskripsi copas, deadline gak realistis.</i>"
+            ),
+            "radar": (
+                "📡 <b>SKILL GAP RADAR</b>\n\n"
+                "/radar — Analisis skill trending vs CV lo\n\n"
+                "📈 Skill naik: banyak dicari, dikit yg punya\n"
+                "📉 Skill turun: demand menurun\n"
+                "🕳️ Skill gap: dicari market tapi lo belum punya\n"
+                "💤 Unused: lo punya tapi gak dicari\n\n"
+                "💡 <i>Update CV lo pake /setprofile biar radar akurat.</i>"
+            ),
+            "timing": (
+                "⏰ <b>BID TIMING ORACLE</b>\n\n"
+                "/timing — Waktu optimal untuk bid\n\n"
+                "Analisis berdasarkan data historis:\n"
+                "• Hari & jam project paling banyak posting\n"
+                "• Window terbaik untuk bid\n"
+                "• Hari/jam yg sepi (buang-buang waktu)\n\n"
+                "💡 <i>Bid dalam 2-4 jam setelah posting — responsiveness matters.</i>"
+            ),
+            "all": (
+                "📋 <b>SEMUA COMMAND</b>\n\n"
+                "🌐 <b>Browse:</b> /browse /fw /sribu /refresh\n"
+                "🔔 <b>Monitor:</b> /monitor /status /digest\n"
+                "📊 <b>Analytics:</b> /trends /topclients /radar /timing\n"
+                "👻 <b>Intel:</b> /ghost\n"
+                "📝 <b>Proposal:</b> /proposal /uploadcv /mycv /setprofile /myprofile\n"
+                "⚔️ <b>Battle:</b> /battle /personas\n"
+                "🛠️ <b>Other:</b> /start /help\n\n"
+                "💡 <b>Tips:</b>\n"
+                "1. /setprofile dulu — biar semua fitur personalized\n"
+                "2. /uploadcv — buat proposal makin akurat\n"
+                "3. /monitor — jangan sampe project kelewat\n"
+                "4. /ghost sebelum bid — filter project sampah\n"
+                "5. /battle — 3 opsi proposal biar lo bisa pilih gaya"
+            ),
+        }
+
+        section = sections.get(callback_id.replace("help:", ""))
+        if not section:
+            return
+
+        await edit_message(
             TELEGRAM_BOT_TOKEN,
-            chat_id,
-            "📖 <b>Panduan Lengkap</b>\n\n"
-            "<b>🚀 Quick Start:</b>\n"
-            "1️⃣ Pilih platform → 2️⃣ Browse project → 3️⃣ Lihat detail → 4️⃣ AI Proposal\n\n"
-            "<b>🌐 Platform Commands:</b>\n"
-            "/browse — Browse Projects.co.id per kategori\n"
-            "/fw — Browse Fastwork.id jobs\n"
-            "/sribu — Browse Sribu.com contests\n\n"
-            "<b>🔔 Monitoring Commands:</b>\n"
-            "/monitor — Atur kategori yang dipantau\n"
-            "/status — Cek status monitoring aktif\n"
-            "/refresh — Cek project baru sekarang\n"
-            "/digest — Ringkasan project hari ini\n\n"
-            "<b>📊 Analytics Commands:</b>\n"
-            "/trends — Analisis trend per kategori\n"
-            "/topclients — Top 10 client terbanyak\n"
-            "/radar — Skill Gap Radar: trending skill vs CV kamu\n"
-            "/timing — Bid Timing Oracle: waktu optimal untuk bid\n\n"
-            "<b>📝 AI Proposal Commands:</b>\n"
-            "/proposal <url> — Generate AI proposal dari URL project\n"
-            "/battle <project> — Proposal Battle Royale: 3 persona bertarung\n"
-            "/personas — Bandingkan 3 persona proposal\n"
-            "/uploadcv — Upload CV PDF (untuk proposal personal)\n"
-            "/mycv — Lihat CV yang sudah diupload\n"
-            "/setprofile — Set profil freelancer (multi-user support)\n"
-            "/myprofile — Lihat profil yang sudah di-set\n\n"
-            "<b>🔍 Intel Commands:</b>\n"
-            "/ghost <project> — Ghost Detector: deteksi project mencurigakan\n\n"
-            "<b>🛠️ Other:</b>\n"
-            "/start — Menu utama\n"
-            "/help — Panduan ini\n\n"
-            "<b>💡 Tips:</b>\n"
-            "• Set profil dulu dengan /setprofile agar proposal sesuai data Anda\n"
-            "• Upload CV dengan /uploadcv untuk proposal lebih personal\n"
-            "• Aktifkan monitoring dengan /monitor agar tidak ada project terlewat\n"
-            "• AI Proposal ada di setiap halaman detail project — klik tombol langsung!",
-            reply_markup=build_main_menu_keyboard(),
+            int(chat_id),
+            message_id,
+            section,
+            reply_markup={
+                "inline_keyboard": [
+                    [{"text": "🔙 Back to Help", "callback_data": "help:back"}],
+                ]
+            },
         )
 
     async def _cmd_status(self, chat_id: str):
@@ -2631,7 +2759,7 @@ class ProjectsBot:
                     "<code>/uploadcv</code> untuk upload.",
                 )
         elif action == "help":
-            await self._cmd_help_text(chat_id)
+            await self._cmd_help(chat_id)
 
     async def _cb_category(
         self, chat_id: str, message_id: int, category_id: str, callback_id: str
