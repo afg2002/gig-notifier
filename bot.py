@@ -68,6 +68,31 @@ from proposal_generator import (
     delete_user_profile,
 )
 
+# ⚔️ Out-of-the-box features
+from intel.ghost_detector import detect_ghost, format_ghost_report
+from analytics.skill_radar import (
+    extract_skills,
+    extract_skills_from_projects,
+    compare_with_cv,
+    analyze_trends,
+    format_skill_radar,
+    format_trend_compact,
+    get_projects_for_period,
+)
+from analytics.bid_timing import (
+    TimingOracle,
+    format_timing_report,
+    format_timing_compact,
+    get_projects_with_dates,
+)
+from ai.proposal_battle import (
+    generate_all_personas,
+    format_battle_intro,
+    format_persona_result,
+    compare_personas,
+    PERSONAS,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -1267,6 +1292,16 @@ class ProjectsBot:
             await self._cmd_setprofile(chat_id, text)
         elif text.startswith("/myprofile"):
             await self._cmd_myprofile(chat_id)
+        elif text.startswith("/ghost"):
+            await self._cmd_ghost(chat_id, text)
+        elif text in ("/radar", "/skillgap"):
+            await self._cmd_skill_radar(chat_id)
+        elif text in ("/timing", "/oracle"):
+            await self._cmd_timing(chat_id)
+        elif text in ("/battle", "/battleroyale"):
+            await self._cmd_battle(chat_id, text)
+        elif text == "/personas":
+            await self._cmd_personas(chat_id)
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
@@ -1481,13 +1516,19 @@ class ProjectsBot:
             "/digest — Ringkasan project hari ini\n\n"
             "<b>📊 Analytics Commands:</b>\n"
             "/trends — Analisis trend per kategori\n"
-            "/topclients — Top 10 client terbanyak\n\n"
+            "/topclients — Top 10 client terbanyak\n"
+            "/radar — Skill Gap Radar: trending skill vs CV kamu\n"
+            "/timing — Bid Timing Oracle: waktu optimal untuk bid\n\n"
             "<b>📝 AI Proposal Commands:</b>\n"
             "/proposal <url> — Generate AI proposal dari URL project\n"
+            "/battle <project> — Proposal Battle Royale: 3 persona bertarung\n"
+            "/personas — Bandingkan 3 persona proposal\n"
             "/uploadcv — Upload CV PDF (untuk proposal personal)\n"
             "/mycv — Lihat CV yang sudah diupload\n"
             "/setprofile — Set profil freelancer (multi-user support)\n"
             "/myprofile — Lihat profil yang sudah di-set\n\n"
+            "<b>🔍 Intel Commands:</b>\n"
+            "/ghost <project> — Ghost Detector: deteksi project mencurigakan\n\n"
             "<b>🛠️ Other:</b>\n"
             "/start — Menu utama\n"
             "/help — Panduan ini\n\n"
@@ -2527,10 +2568,10 @@ class ProjectsBot:
             await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="🏆 Loading top clients...")
             await self._cmd_top_clients(chat_id)
         elif action == "proposal":
-            await edit_message(
+            # Send NEW message bubble instead of editing
+            await send_message(
                 TELEGRAM_BOT_TOKEN,
-                int(chat_id),
-                message_id,
+                chat_id,
                 "📝 <b>Generate AI Proposal</b>\n\n"
                 "Ada 2 cara untuk generate proposal:\n\n"
                 "1️⃣ <b>Dari daftar project:</b>\n"
@@ -2543,13 +2584,12 @@ class ProjectsBot:
                 "• projects.co.id\n"
                 "• fastwork.id\n"
                 "• sribu.com",
-                reply_markup=build_main_menu_keyboard(),
             )
         elif action == "uploadcv":
-            await edit_message(
+            # Send NEW message bubble instead of editing
+            await send_message(
                 TELEGRAM_BOT_TOKEN,
-                int(chat_id),
-                message_id,
+                chat_id,
                 "📄 <b>Upload CV PDF</b>\n\n"
                 "Kirim file PDF CV Anda sebagai document (bukan foto).\n\n"
                 "Cara:\n"
@@ -2558,32 +2598,28 @@ class ProjectsBot:
                 "3. Pilih file PDF CV Anda\n\n"
                 "CV akan disimpan secara private dan digunakan "
                 "untuk membuat proposal yang lebih personal.",
-                reply_markup=build_main_menu_keyboard(),
             )
         elif action == "mycv":
+            # Send NEW message bubble instead of editing
             cv_text = get_user_cv_text(chat_id)
             if cv_text:
                 preview = cv_text[:300] + "..." if len(cv_text) > 300 else cv_text
-                await edit_message(
+                await send_message(
                     TELEGRAM_BOT_TOKEN,
-                    int(chat_id),
-                    message_id,
+                    chat_id,
                     f"✅ <b>CV Tersimpan</b>\n\n"
                     f"Panjang: {len(cv_text)} karakter\n\n"
                     f"Preview:\n"
                     f"<code>{preview}</code>\n\n"
                     "CV ini akan digunakan untuk generate proposal personal.",
-                    reply_markup=build_main_menu_keyboard(),
                 )
             else:
-                await edit_message(
+                await send_message(
                     TELEGRAM_BOT_TOKEN,
-                    int(chat_id),
-                    message_id,
+                    chat_id,
                     "📭 <b>Belum Ada CV</b>\n\n"
                     "Anda belum upload CV. Kirim file PDF dengan "
                     "<code>/uploadcv</code> untuk upload.",
-                    reply_markup=build_main_menu_keyboard(),
                 )
         elif action == "help":
             await self._cmd_help_text(chat_id)
@@ -3503,6 +3539,231 @@ async def webhook_server(bot: 'ProjectsBot'):
     # Keep server running
     while True:
         await asyncio.sleep(3600)
+
+    # ============================================================
+    # ⚔️ Out-of-the-box Commands
+    # ============================================================
+
+    async def _cmd_ghost(self, chat_id: str, text: str):
+        """Analyze project for ghosting probability."""
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            "👻 <b>Ghost Detector</b>\n\n"
+            "Kirim detail project untuk dianalisis:\n\n"
+            "<code>/ghost Judul Project | Budget | Deskripsi singkat</code>\n\n"
+            "Contoh:\n"
+            "<code>/ghost Buat website Tokopedia | 1.5jt | ikutin saja fiturnya</code>",
+        )
+
+    async def _cmd_skill_radar(self, chat_id: str):
+        """Show skill gap radar — trending skills vs user CV."""
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            "📡 <b>Skill Gap Radar</b>\n\n"
+            "🔍 Menganalisis trend skill dari semua platform...",
+        )
+
+        try:
+            from database import get_db
+            with get_db() as conn:
+                current = get_projects_for_period(conn, days=30)
+                previous = get_projects_for_period(conn, days=60)
+
+            if not current:
+                await send_message(
+                    TELEGRAM_BOT_TOKEN, chat_id,
+                    "⚠️ Belum cukup data project untuk analisis skill.\n"
+                    "Tunggu beberapa hari sampai data terkumpul.",
+                )
+                return
+
+            curr_skills = extract_skills_from_projects(current)
+            prev_skills = extract_skills_from_projects(previous)
+
+            # Get CV skills
+            cv_skills = []
+            try:
+                profile = get_user_profile(chat_id)
+                if profile and profile.get("skills"):
+                    cv_skills = [s.strip() for s in profile["skills"].split(",")]
+            except Exception:
+                pass
+
+            if not cv_skills:
+                # Default common skills
+                cv_skills = ["Laravel", "PHP", "JavaScript", "MySQL", "Bootstrap", "HTML", "CSS"]
+
+            analysis = compare_with_cv(curr_skills, cv_skills)
+            trends = analyze_trends(curr_skills, prev_skills)
+
+            report = format_skill_radar(analysis, trends)
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, report)
+
+        except Exception as e:
+            logger.error(f"Skill radar error: {e}")
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                f"❌ Gagal menganalisis skill: {e}\n\n"
+                "Pastikan database sudah terinisialisasi dengan /start",
+            )
+
+    async def _cmd_timing(self, chat_id: str):
+        """Show bid timing oracle — optimal bid windows."""
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            "⏰ <b>Bid Timing Oracle</b>\n\n"
+            "🔍 Menganalisis pola posting project...",
+        )
+
+        try:
+            from database import get_db
+            with get_db() as conn:
+                projects = get_projects_with_dates(conn, days=90)
+
+            if len(projects) < 10:
+                await send_message(
+                    TELEGRAM_BOT_TOKEN, chat_id,
+                    "⚠️ Belum cukup data untuk analisis timing.\n"
+                    f"Data tersedia: {len(projects)} project. Butuh minimal 10.",
+                )
+                return
+
+            oracle = TimingOracle()
+            analysis = oracle.analyze(projects)
+            recs = oracle.recommend(analysis)
+            report = format_timing_report(analysis, recs)
+
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, report)
+
+        except Exception as e:
+            logger.error(f"Timing oracle error: {e}")
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                f"❌ Gagal menganalisis timing: {e}",
+            )
+
+    async def _cmd_battle(self, chat_id: str, text: str):
+        """Generate 3 persona proposals for a project."""
+        # Parse: /battle Project Title | Budget | Description
+        args = text.replace("/battle", "").replace("/battleroyale", "").strip()
+
+        if not args:
+            await send_message(
+                TELEGRAM_BOT_TOKEN, chat_id,
+                "⚔️ <b>Proposal Battle Royale</b>\n\n"
+                "Generate 3 proposal dengan persona berbeda.\n\n"
+                "<b>Format:</b>\n"
+                "<code>/battle Judul Project | Budget | Deskripsi</code>\n\n"
+                "Atau reply project dari /browse /fw /sribu dengan command /battle",
+            )
+            return
+
+        parts = args.split("|", 2)
+        title = parts[0].strip() if len(parts) > 0 else ""
+        budget = parts[1].strip() if len(parts) > 1 else ""
+        desc = parts[2].strip() if len(parts) > 2 else ""
+
+        if not title:
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, "❌ Judul project diperlukan.")
+            return
+
+        # Intro
+        await send_message(TELEGRAM_BOT_TOKEN, chat_id, format_battle_intro(title))
+
+        # Get CV skills
+        cv_skills = None
+        try:
+            profile = get_user_profile(chat_id)
+            if profile and profile.get("skills"):
+                cv_skills = [s.strip() for s in profile["skills"].split(",")]
+        except Exception:
+            pass
+
+        # Generate all 3 proposals
+        battle = generate_all_personas(
+            project_title=title,
+            project_description=desc,
+            project_budget=budget,
+            cv_skills=cv_skills,
+        )
+
+        for key in ["agresif", "premium", "teknis"]:
+            data = battle[key]
+            try:
+                # Call LLM via existing proposal_generator (if available)
+                proposal_text = await self._generate_battle_proposal(data["prompt"])
+                formatted = format_persona_result(key, proposal_text)
+
+                # Split long proposals
+                if len(formatted) > 4000:
+                    chunks = [formatted[i:i+3800] for i in range(0, len(formatted), 3800)]
+                    for chunk in chunks:
+                        await send_message(TELEGRAM_BOT_TOKEN, chat_id, chunk)
+                else:
+                    await send_message(TELEGRAM_BOT_TOKEN, chat_id, formatted)
+
+            except Exception as e:
+                logger.error(f"Error generating {key} proposal: {e}")
+                await send_message(
+                    TELEGRAM_BOT_TOKEN, chat_id,
+                    f"⚠️ Gagal generate proposal {PERSONAS[key]['name']}: {e}",
+                )
+
+    async def _generate_battle_proposal(self, prompt: str) -> str:
+        """Generate a proposal using the existing LLM pipeline."""
+        try:
+            from proposal_generator import OPENROUTER_API_KEY, OPENROUTER_MODEL
+
+            if not OPENROUTER_API_KEY:
+                return (
+                    "⚠️ <i>OpenRouter API key tidak ditemukan.</i>\n\n"
+                    "Gunakan command /setprofile untuk set API key, "
+                    "atau copy prompt ini ke ChatGPT/Claude:\n\n"
+                    f"<code>{prompt[:500]}...</code>"
+                )
+
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": OPENROUTER_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.8,
+                "max_tokens": 1500,
+            }
+
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                ) as resp:
+                    if resp.status != 200:
+                        err = await resp.text()
+                        logger.error(f"OpenRouter error: {err}")
+                        return f"⚠️ Gagal generate: HTTP {resp.status}"
+
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"]
+
+        except ImportError:
+            return (
+                "⚠️ <i>proposal_generator module tidak tersedia.</i>\n\n"
+                "Copy prompt ini ke ChatGPT/Claude untuk generate manual:\n\n"
+                f"<code>{prompt[:800]}...</code>"
+            )
+        except Exception as e:
+            logger.error(f"Battle proposal error: {e}")
+            return f"⚠️ Error: {e}"
+
+    async def _cmd_personas(self, chat_id: str):
+        """Show persona comparison."""
+        await send_message(
+            TELEGRAM_BOT_TOKEN, chat_id,
+            compare_personas(),
+        )
 
 
 # ============================================================
