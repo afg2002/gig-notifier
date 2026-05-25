@@ -171,6 +171,39 @@ def scrape_jobs(
     return jobs, meta
 
 
+def get_job_by_url(url: str) -> Optional[FastworkJob]:
+    """
+    Fetch a Fastwork job by its URL.
+    Uses the API job detail endpoint to get full info including client name.
+
+    Args:
+        url: e.g. https://jobboard.fastwork.id/jobs/abc123-def456
+
+    Returns:
+        FastworkJob or None if not found.
+    """
+    # Extract job ID from URL
+    job_id_match = re.search(r'/jobs/([a-f0-9-]+)', url)
+    if not job_id_match:
+        logger.warning(f"Cannot extract job ID from Fastwork URL: {url}")
+        return None
+
+    job_id = job_id_match.group(1)
+    detail_url = f"{BASE_URL}/api/jobs/{job_id}"
+
+    result = _api_request(detail_url)
+    if "errors" in result:
+        logger.error(f"Fastwork job detail API error: {result['errors']}")
+        return None
+
+    item = result.get("data")
+    if not item:
+        logger.warning(f"No data for Fastwork job {job_id}")
+        return None
+
+    return _raw_job_to_fastwork_job(item)
+
+
 def get_jobs_by_tag(tag_id: str = None, max_pages: int = 10) -> tuple[list[FastworkJob], int]:
     """
     Get jobs filtered by tag_id, fetching multiple pages until we have enough.
