@@ -1,5 +1,5 @@
 """
-Skill Gap Radar 📡
+Radar Skill 📡
 Track trending tech keywords across all platforms, compare with user CV,
 and show rising/falling skills with actionable insights.
 

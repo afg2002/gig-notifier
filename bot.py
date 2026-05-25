@@ -849,6 +849,10 @@ def build_main_menu_keyboard() -> dict:
             [{"text": "📄 Upload CV PDF", "callback_data": "menu:uploadcv"},
              {"text": "👁️ Lihat CV Saya", "callback_data": "menu:mycv"}],
 
+            # ── Profile ──
+            [{"text": "👤 Profil Saya", "callback_data": "menu:myprofile"},
+             {"text": "📡 Radar Skill", "callback_data": "radar"}],
+
             # ── Info & Stats ──
             [{"text": "🔄 Refresh Projects", "callback_data": "menu:refresh"},
              {"text": "📈 Daily Digest", "callback_data": "menu:digest"}],
@@ -1301,16 +1305,6 @@ class ProjectsBot:
             await self._cmd_setprofile(chat_id, text)
         elif text.startswith("/myprofile"):
             await self._cmd_myprofile(chat_id)
-        elif text.startswith("/ghost"):
-            await self._cmd_ghost(chat_id, text)
-        elif text in ("/radar", "/skillgap"):
-            await self._cmd_skill_radar(chat_id)
-        elif text in ("/timing", "/oracle"):
-            await self._cmd_timing(chat_id)
-        elif text in ("/battle", "/battleroyale"):
-            await self._cmd_battle(chat_id, text)
-        elif text == "/personas":
-            await self._cmd_personas(chat_id)
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
@@ -1379,7 +1373,7 @@ class ProjectsBot:
                 source = parts[1]
                 cache_key = parts[2] if len(parts) > 2 else ""
                 proj_url = self._proposal_url_cache.get(cache_key, "")
-                await self._cb_ai_proposal(chat_id, message_id, source, proj_url, callback_id)
+                await self._cb_ai_proposal(chat_id, message_id, source, proj_url, cache_key, callback_id)
             elif action == "sribu_cat":
                 cat_id = parts[1]
                 page = int(parts[2])
@@ -1393,6 +1387,18 @@ class ProjectsBot:
                 cat_id = parts[1]
                 self.sribu_monitor.toggle(cat_id)
                 await self._sribu_monitor(chat_id, message_id, callback_id)
+            elif action == "ghost":
+                # ghost:<source>:<cache_key>
+                source = parts[1]
+                cache_key = parts[2] if len(parts) > 2 else ""
+                await self._cb_ghost_check(chat_id, message_id, source, cache_key, callback_id)
+            elif action == "radar":
+                await self._cb_skill_radar(chat_id, message_id, callback_id)
+            elif action == "battle":
+                # battle:<source>:<cache_key>
+                source = parts[1]
+                cache_key = parts[2] if len(parts) > 2 else ""
+                await self._cb_battle_royale(chat_id, message_id, source, cache_key, callback_id)
             elif action == "help":
                 help_action = parts[1] if len(parts) > 1 else "all"
                 if help_action == "back":
@@ -1403,10 +1409,7 @@ class ProjectsBot:
                              {"text": "🔔 Monitoring", "callback_data": "help:monitor"}],
                             [{"text": "📊 Analytics & Intel", "callback_data": "help:analytics"},
                              {"text": "📝 AI Proposal", "callback_data": "help:proposal"}],
-                            [{"text": "⚔️ Battle Royale", "callback_data": "help:battle"},
-                             {"text": "👻 Ghost Detector", "callback_data": "help:ghost"}],
-                            [{"text": "📡 Skill Radar", "callback_data": "help:radar"},
-                             {"text": "⏰ Bid Timing", "callback_data": "help:timing"}],
+                            [{"text": "👤 Profile & CV", "callback_data": "help:profile"}],
                             [{"text": "📋 SEMUA COMMAND", "callback_data": "help:all"}],
                         ]
                     }
@@ -1416,12 +1419,9 @@ class ProjectsBot:
                         "Pilih kategori untuk lihat command:\n\n"
                         "🌐 <b>Browse</b> — Cari project di 3 platform\n"
                         "🔔 <b>Monitor</b> — Pantau project baru otomatis\n"
-                        "📊 <b>Analytics</b> — Trend, stats, klien top\n"
-                        "📝 <b>AI Proposal</b> — Generate proposal otomatis\n"
-                        "⚔️ <b>Battle</b> — 3 persona proposal bertarung\n"
-                        "👻 <b>Ghost</b> — Deteksi project mencurigakan\n"
-                        "📡 <b>Radar</b> — Skill gap vs market demand\n"
-                        "⏰ <b>Timing</b> — Waktu optimal untuk bid\n\n"
+                        "📊 <b>Analytics</b> — Trend, timing, klien top, ghost check\n"
+                        "📝 <b>AI Proposal</b> — Generate proposal + bandingkan 3 gaya\n"
+                        "👤 <b>Profile</b> — Set profil, upload CV, radar skill\n\n"
                         "⬇️ Klik tombol di bawah untuk lihat detail",
                         reply_markup=keyboard,
                     )
@@ -1546,10 +1546,7 @@ class ProjectsBot:
                  {"text": "🔔 Monitoring", "callback_data": "help:monitor"}],
                 [{"text": "📊 Analytics & Intel", "callback_data": "help:analytics"},
                  {"text": "📝 AI Proposal", "callback_data": "help:proposal"}],
-                [{"text": "⚔️ Battle Royale", "callback_data": "help:battle"},
-                 {"text": "👻 Ghost Detector", "callback_data": "help:ghost"}],
-                [{"text": "📡 Skill Radar", "callback_data": "help:radar"},
-                 {"text": "⏰ Bid Timing", "callback_data": "help:timing"}],
+                [{"text": "👤 Profile & CV", "callback_data": "help:profile"}],
                 [{"text": "📋 SEMUA COMMAND", "callback_data": "help:all"}],
             ]
         }
@@ -1559,12 +1556,9 @@ class ProjectsBot:
             "Pilih kategori untuk lihat command:\n\n"
             "🌐 <b>Browse</b> — Cari project di 3 platform\n"
             "🔔 <b>Monitor</b> — Pantau project baru otomatis\n"
-            "📊 <b>Analytics</b> — Trend, stats, klien top\n"
-            "📝 <b>AI Proposal</b> — Generate proposal otomatis\n"
-            "⚔️ <b>Battle</b> — 3 persona proposal bertarung\n"
-            "👻 <b>Ghost</b> — Deteksi project mencurigakan\n"
-            "📡 <b>Radar</b> — Skill gap vs market demand\n"
-            "⏰ <b>Timing</b> — Waktu optimal untuk bid\n\n"
+            "📊 <b>Analytics</b> — Trend, timing, klien top, ghost check\n"
+            "📝 <b>AI Proposal</b> — Generate proposal + bandingkan 3 gaya\n"
+            "👤 <b>Profile</b> — Set profil, upload CV, radar skill\n\n"
             "⬇️ Klik tombol di bawah atau scroll ke /help_all",
             reply_markup=keyboard,
         )
@@ -1578,7 +1572,8 @@ class ProjectsBot:
                 "/fw — Fastwork.id jobs\n"
                 "/sribu — Sribu.com contests\n"
                 "/refresh — Cek project baru sekarang\n\n"
-                "💡 <i>Pilih kategori lewat inline keyboard setelah command</i>"
+                "💡 <i>Buka detail project → klik 👻 Cek Ghosting untuk deteksi project mencurigakan.</i>\n"
+                "<i>Di detail project juga ada ⏰ info waktu emas bid.</i>"
             ),
             "monitor": (
                 "🔔 <b>MONITORING</b>\n\n"
@@ -1589,75 +1584,55 @@ class ProjectsBot:
             ),
             "analytics": (
                 "📊 <b>ANALYTICS & INTEL</b>\n\n"
-                "/trends — Trend project per kategori\n"
-                "/topclients — Top 10 client terbanyak\n"
-                "/radar — Skill gap vs CV lo\n"
-                "/timing — Waktu optimal bid\n"
-                "/ghost — Deteksi project mencurigakan\n\n"
-                "💡 <i>/ghost bisa dipake sebelum lo bid — biar gak buang waktu</i>"
+                "/trends — Trend project + ⏰ Waktu Emas Bid\n"
+                "/topclients — Top 10 client terbanyak\n\n"
+                "🔍 <b>Fitur Intel Terintegrasi:</b>\n"
+                "👻 <b>Detektor Ghosting</b> — Buka detail project → klik Cek Ghosting\n"
+                "   Score 0-100: ✅Safe → 🙂Low → 🤔Medium → 😱High → 👻Poltergeist\n"
+                "⏰ <b>Waktu Emas Bid</b> — Ada di /trends, lihat jam & hari optimal bid\n\n"
+                "💡 <i>Gunakan ghost check sebelum bid — filter project sampah.</i>"
             ),
             "proposal": (
                 "📝 <b>AI PROPOSAL</b>\n\n"
-                "/proposal [url] — Generate proposal dari URL project\n"
-                "/uploadcv — Upload CV PDF\n"
-                "/mycv — Lihat CV tersimpan\n"
-                "/setprofile — Set profil freelancer\n"
-                "/myprofile — Lihat profil\n\n"
+                "/proposal [url] — Generate proposal dari URL project\n\n"
+                "⚔️ <b>Duel Gaya Proposal</b> — Setelah generate proposal, klik\n"
+                "   \"Bandingkan 3 Gaya\" untuk lihat 3 persona berbeda:\\n"
+                "   🔥 <b>Si Agresif</b> — Harga miring, timeline ngebut\n"
+                "   💎 <b>Si Premium</b> — Kualitas enterprise, harga premium\n"
+                "   🤓 <b>Si Teknis</b> — Detail arsitektur, tech stack solid\n\n"
                 "💡 <i>Set profil dulu biar proposal personalized. CV bikin proposal makin akurat.</i>"
             ),
-            "battle": (
-                "⚔️ <b>PROPOSAL BATTLE ROYALE</b>\n\n"
-                "/battle [judul] | [budget] | [deskripsi]\n"
-                "/personas — Bandingkan 3 persona\n\n"
-                "🔥 <b>Si Agresif</b> — Harga miring, timeline ngebut\n"
-                "💎 <b>Si Premium</b> — Kualitas tinggi, harga premium\n"
-                "🤓 <b>Si Teknis</b> — Detail arsitektur, tech stack solid\n\n"
-                "💡 <i>Pilih persona sesuai client. Agresif buat project kecil, Premium buat corporate.</i>"
-            ),
-            "ghost": (
-                "👻 <b>GHOST DETECTOR</b>\n\n"
-                "/ghost [judul] | [budget] | [deskripsi]\n\n"
-                "Score 0-100 — makin tinggi makin ghost:\n"
-                "✅ 0-20: Project legit\n"
-                "🙂 20-40: Low risk\n"
-                "🤔 40-60: Perlu due diligence\n"
-                "😱 60-80: High risk — waspada\n"
-                "👻 80-100: POLTERGEIST — hampir pasti ghosting\n\n"
-                "💡 <i>Deteksi pola: budget gak masuk akal, client baru, deskripsi copas, deadline gak realistis.</i>"
-            ),
-            "radar": (
-                "📡 <b>SKILL GAP RADAR</b>\n\n"
-                "/radar — Analisis skill trending vs CV lo\n\n"
-                "📈 Skill naik: banyak dicari, dikit yg punya\n"
-                "📉 Skill turun: demand menurun\n"
-                "🕳️ Skill gap: dicari market tapi lo belum punya\n"
-                "💤 Unused: lo punya tapi gak dicari\n\n"
-                "💡 <i>Update CV lo pake /setprofile biar radar akurat.</i>"
-            ),
-            "timing": (
-                "⏰ <b>BID TIMING ORACLE</b>\n\n"
-                "/timing — Waktu optimal untuk bid\n\n"
-                "Analisis berdasarkan data historis:\n"
-                "• Hari & jam project paling banyak posting\n"
-                "• Window terbaik untuk bid\n"
-                "• Hari/jam yg sepi (buang-buang waktu)\n\n"
-                "💡 <i>Bid dalam 2-4 jam setelah posting — responsiveness matters.</i>"
+            "profile": (
+                "👤 <b>PROFILE & CV</b>\n\n"
+                "/setprofile — Set profil freelancer\n"
+                "/myprofile — Lihat profil tersimpan\n"
+                "/uploadcv — Upload CV PDF\n"
+                "/mycv — Lihat CV + 📡 Radar Skill\n\n"
+                "📡 <b>Radar Skill</b> — Dari /mycv, klik Radar Skill untuk:\n"
+                "   📈 Skill trending di market\n"
+                "   🕳️ Gap antara CV lo & demand market\n"
+                "   💤 Skill yg lo punya tapi gak dicari\n\n"
+                "💡 <i>Set profile + upload CV dulu — biar semua fitur personalized.</i>"
             ),
             "all": (
                 "📋 <b>SEMUA COMMAND</b>\n\n"
                 "🌐 <b>Browse:</b> /browse /fw /sribu /refresh\n"
                 "🔔 <b>Monitor:</b> /monitor /status /digest\n"
-                "📊 <b>Analytics:</b> /trends /topclients /radar /timing\n"
-                "👻 <b>Intel:</b> /ghost\n"
+                "📊 <b>Analytics:</b> /trends /topclients\n"
                 "📝 <b>Proposal:</b> /proposal /uploadcv /mycv /setprofile /myprofile\n"
-                "⚔️ <b>Battle:</b> /battle /personas\n"
                 "🛠️ <b>Other:</b> /start /help\n\n"
-                "💡 <b>Tips:</b>\n"
-                "1. /setprofile dulu — biar semua fitur personalized\n"
-                "2. /uploadcv — buat proposal makin akurat\n"
-                "3. /monitor — jangan sampe project kelewat\n"
-                "4. /ghost sebelum bid — filter project sampah\n"
-                "5. /battle — 3 opsi proposal biar lo bisa pilih gaya"
+                "🧠 <b>Fitur Pintar (terintegrasi):</b>\n"
+                "👻 <b>Detektor Ghosting</b> — Di detail project → \"Cek Ghosting\"\n"
+                "📡 <b>Radar Skill</b> — Di /mycv → \"Radar Skill\"\n"
+                "⏰ <b>Waktu Emas Bid</b> — Di /trends (otomatis)\n"
+                "⚔️ <b>Duel Gaya Proposal</b> — Setelah /proposal → \"Bandingkan 3 Gaya\"\n\n"
+                "💡 <b>Workflow Rekomendasi:</b>\n"
+                "1. /setprofile — set profil freelancer lo\n"
+                "2. /uploadcv — upload CV PDF\n"
+                "3. /browse → pilih project → 👻 Cek Ghosting\n"
+                "4. 📝 Generate AI Proposal → ⚔️ Bandingkan 3 Gaya\n"
+                "5. /monitor — biar gak kelewat project baru\n"
+                "6. /mycv → 📡 Radar Skill — cek skill yg perlu dipelajari"
             ),
         }
 
@@ -1789,10 +1764,23 @@ class ProjectsBot:
     # ---- Trend Analysis ----
 
     async def _cmd_trends(self, chat_id: str):
-        """Show weekly trend analysis dashboard."""
+        """Show weekly trend analysis + Waktu Emas Bid ⏰."""
         report = format_trend_report()
         if report:
             await send_message(TELEGRAM_BOT_TOKEN, chat_id, report)
+            # Append timing oracle compact
+            try:
+                from database import get_db
+                from analytics.bid_timing import TimingOracle, get_projects_with_dates, format_timing_compact
+                with get_db() as conn:
+                    projects = get_projects_with_dates(conn, days=90)
+                if len(projects) >= 10:
+                    oracle = TimingOracle()
+                    analysis = oracle.analyze(projects)
+                    timing_text = format_timing_compact(analysis)
+                    await send_message(TELEGRAM_BOT_TOKEN, chat_id, timing_text)
+            except Exception as e:
+                logger.error(f"Timing oracle (trends) error: {e}")
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN, chat_id,
@@ -2072,8 +2060,10 @@ class ProjectsBot:
             )
 
     async def _cmd_my_cv(self, chat_id: str):
-        """Handle /mycv - show CV status."""
+        """Handle /mycv - show CV status with Radar Skill button."""
         cv_text = get_user_cv_text(chat_id)
+        radar_btn = [{"text": "📡 Radar Skill", "callback_data": "radar"}]
+        
         if cv_text:
             preview = cv_text[:300] + "..." if len(cv_text) > 300 else cv_text
             await send_message(
@@ -2083,14 +2073,17 @@ class ProjectsBot:
                 f"Preview:\n"
                 f"<code>{preview}</code>\n\n"
                 "CV ini akan digunakan untuk generate proposal personal.\n"
-                "Kirim file baru dengan <code>/uploadcv</code> untuk update."
+                "Kirim file baru dengan <code>/uploadcv</code> untuk update.",
+                reply_markup={"inline_keyboard": [radar_btn, [{"text": "📝 Set Profile", "callback_data": "menu:setprofile"}]]},
             )
         else:
             await send_message(
                 TELEGRAM_BOT_TOKEN, chat_id,
                 "📭 <b>Belum Ada CV</b>\n\n"
                 "Anda belum upload CV. Kirim file PDF dengan "
-                "<code>/uploadcv</code> untuk upload."
+                "<code>/uploadcv</code> untuk upload.\n\n"
+                "Atau set dulu profil lo dulu:",
+                reply_markup={"inline_keyboard": [radar_btn, [{"text": "📝 Set Profile", "callback_data": "menu:setprofile"}]]},
             )
 
     async def _cmd_myprofile(self, chat_id: str):
@@ -2368,18 +2361,10 @@ class ProjectsBot:
 
         keyboard = {
             "inline_keyboard": [
-                [
-                    {"text": "🔗 View Full Job", "url": job.link},
-                ],
-                [
-                    {
-                        "text": "📝 Generate AI Proposal",
-                        "callback_data": f"proposal:fw:{proposal_key}",
-                    }
-                ],
-                [
-                    {"text": "🔙 Back to Jobs", "callback_data": f"fwcat:{job.tag_id}:1"},
-                ],
+                [{"text": "🔗 View Full Job", "url": job.link}],
+                [{"text": "📝 Generate AI Proposal", "callback_data": f"proposal:fw:{proposal_key}"}],
+                [{"text": "👻 Cek Ghosting", "callback_data": f"ghost:fw:{proposal_key}"}],
+                [{"text": "🔙 Back to Jobs", "callback_data": f"fwcat:{job.tag_id}:1"}],
             ]
         }
 
@@ -2575,18 +2560,10 @@ class ProjectsBot:
 
         keyboard = {
             "inline_keyboard": [
-                [
-                    {"text": "🔗 View Contest", "url": contest.contest_url},
-                ],
-                [
-                    {
-                        "text": "📝 Generate AI Proposal",
-                        "callback_data": f"proposal:sribu:{proposal_key}",
-                    }
-                ],
-                [
-                    {"text": "🔙 Back to Contests", "callback_data": "sribu_cat:all:1"},
-                ],
+                [{"text": "🔗 View Contest", "url": contest.contest_url}],
+                [{"text": "📝 Generate AI Proposal", "callback_data": f"proposal:sribu:{proposal_key}"}],
+                [{"text": "👻 Cek Ghosting", "callback_data": f"ghost:sribu:{proposal_key}"}],
+                [{"text": "🔙 Back to Contests", "callback_data": "sribu_cat:all:1"}],
             ]
         }
 
@@ -2760,6 +2737,46 @@ class ProjectsBot:
                 )
         elif action == "help":
             await self._cmd_help(chat_id)
+        elif action == "setprofile":
+            await send_message(
+                TELEGRAM_BOT_TOKEN,
+                chat_id,
+                "📝 <b>Set Profil Freelancer</b>\n\n"
+                "Format: <code>/setprofile Nama|Title|Skills|Years|Portfolio</code>\n\n"
+                "Contoh:\n"
+                "<code>/setprofile Budi Santoso|Web Developer|JavaScript, React, Node|3|https://budi.dev</code>\n\n"
+                "Field:\n"
+                "• <b>Nama</b> - Nama lengkap Anda\n"
+                "• <b>Title</b> - Judul profesional\n"
+                "• <b>Skills</b> - Skill dipisahkan koma\n"
+                "• <b>Years</b> - Tahun pengalaman\n"
+                "• <b>Portfolio</b> - Link portfolio/GitHub",
+            )
+        elif action == "myprofile":
+            profile = get_user_profile(chat_id)
+            if profile:
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                    f"👤 <b>Profil Anda</b>\n\n"
+                    f"<b>Nama:</b> {profile.get('name', '-')}\n"
+                    f"<b>Title:</b> {profile.get('title', '-')}\n"
+                    f"<b>Email:</b> {profile.get('email', '-')}\n"
+                    f"<b>Skills:</b> {profile.get('skills', '-')}\n"
+                    f"<b>Experience:</b> {profile.get('experience_years', 0)} tahun\n"
+                    f"<b>Portfolio:</b> {profile.get('portfolio', '-')}\n"
+                    f"<b>GitHub:</b> {profile.get('github', '-')}\n\n"
+                    f"Di-set: {profile.get('set_at', 'N/A')[:10]}\n\n"
+                    "Update dengan <code>/setprofile</code>",
+                )
+            else:
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                    "📭 <b>Belum Ada Profil</b>\n\n"
+                    "Anda belum mengatur profil. Gunakan:\n"
+                    "<code>/setprofile</code> untuk instruksi cara set profil.\n\n"
+                    "Atau langsung dengan format:\n"
+                    "<code>/setprofile Nama|Title|Skills|Years|Portfolio</code>\n\n"
+                    "Contoh:\n"
+                    "<code>/setprofile Budi Santoso|Web Developer|JavaScript, React, Node|3|https://budi.dev</code>",
+                )
 
     async def _cb_category(
         self, chat_id: str, message_id: int, category_id: str, callback_id: str
@@ -3024,27 +3041,13 @@ class ProjectsBot:
         # Cache URL for AI proposal button
         proposal_key = self._cache_proposal_url(project.link)
 
-        # Keyboard with View Project + AI Proposal
+        # Keyboard with View Project + AI Proposal + Ghost Check
         kb = {
             "inline_keyboard": [
-                [
-                    {
-                        "text": "🔗 View Project",
-                        "url": project.link,
-                    }
-                ],
-                [
-                    {
-                        "text": "📝 Generate AI Proposal",
-                        "callback_data": f"proposal:projects:{proposal_key}",
-                    }
-                ],
-                [
-                    {
-                        "text": "🔙 Kembali ke List",
-                        "callback_data": f"page:{category_id}:{page}",
-                    }
-                ],
+                [{"text": "🔗 View Project", "url": project.link}],
+                [{"text": "📝 Generate AI Proposal", "callback_data": f"proposal:projects:{proposal_key}"}],
+                [{"text": "👻 Cek Ghosting", "callback_data": f"ghost:projects:{proposal_key}"}],
+                [{"text": "🔙 Kembali ke List", "callback_data": f"page:{category_id}:{page}"}],
                 [{"text": "🏠 Main Menu", "callback_data": "menu:back"}],
             ]
         }
@@ -3068,7 +3071,7 @@ class ProjectsBot:
 
     async def _cb_ai_proposal(
         self, chat_id: str, message_id: int, source: str,
-        proj_url: str, callback_id: str
+        proj_url: str, proposal_key: str, callback_id: str
     ):
         """Handle AI Proposal button from any project detail view."""
         await answer_callback(TELEGRAM_BOT_TOKEN, callback_id)
@@ -3145,21 +3148,21 @@ class ProjectsBot:
 
             tip_text = (
                 f"✅ Proposal {'' if was_cached else 'di-generate '}dengan CV Anda.\n"
-                f"Sisa proposal: {remaining - 1}/5\n\n"
-                "Pilih menu di bawah:" if cv_text else (
-                    f"💡 <b>Tips:</b> Upload CV dengan <code>/uploadcv</code> "
-                    f"untuk proposal lebih personal.\n"
-                    f"Sisa proposal: {remaining - 1}/5\n\n"
-                    "Pilih menu di bawah:"
-                )
+                f"Sisa proposal: {remaining - 1}/5"
             )
+            tip_kb = {
+                "inline_keyboard": [
+                    [{"text": "⚔️ Bandingkan 3 Gaya", "callback_data": f"battle:{source}:{proposal_key}"}],
+                    [{"text": "🏠 Main Menu", "callback_data": "menu:back"}],
+                ]
+            }
 
             await edit_message(
                 TELEGRAM_BOT_TOKEN,
                 int(chat_id),
                 message_id,
                 tip_text,
-                reply_markup=build_main_menu_keyboard(),
+                reply_markup=tip_kb,
             )
 
         except Exception as e:
@@ -3591,76 +3594,88 @@ class ProjectsBot:
     # ⚔️ Out-of-the-box Commands
     # ============================================================
 
-    async def _cmd_ghost(self, chat_id: str, text: str):
-        """Analyze project for ghosting probability."""
-        # Parse: /ghost Project Title | Budget | Description
-        args = text.replace("/ghost", "").strip()
-        if not args:
-            await send_message(
-                TELEGRAM_BOT_TOKEN, chat_id,
-                "👻 <b>Ghost Detector</b>\n\n"
-                "Kirim detail project untuk dianalisis:\n\n"
-                "<code>/ghost Judul Project | Budget | Deskripsi singkat</code>\n\n"
-                "Contoh:\n"
-                "<code>/ghost Buat website Tokopedia | 1.5jt | ikutin saja fiturnya</code>",
-            )
-            return
+    # ================================================================
+    # Integrated Feature Callbacks (replaces standalone commands)
+    # ================================================================
 
-        parts = args.split("|", 2)
-        title = parts[0].strip() if len(parts) > 0 else "Project Unknown"
-        budget_str = parts[1].strip() if len(parts) > 1 else ""
-        desc = parts[2].strip() if len(parts) > 2 else ""
-
-        # Parse budget
+    async def _cb_ghost_check(self, chat_id: str, message_id: int, source: str,
+                               cache_key: str, callback_id: str):
+        """👻 Detektor Ghosting — integrated into project detail views."""
+        await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="👻 Menganalisis kredibilitas project...")
+        
+        proj_url = self._proposal_url_cache.get(cache_key, "")
+        title = desc = client_name = ""
         budget = None
-        if budget_str:
-            budget = _parse_budget(budget_str)
-
-        # Try to get client info from DB
+        
+        # Try to scrape project details for analysis
+        if proj_url:
+            try:
+                loop = asyncio.get_event_loop()
+                detail = await loop.run_in_executor(None, scrape_project_detail, proj_url)
+                if detail:
+                    title = detail.title
+                    desc = detail.description or ""
+                    client_name = detail.client_name or ""
+                    if detail.budget:
+                        budget = _parse_budget(detail.budget)
+            except Exception as e:
+                logger.error(f"Ghost check scrape error: {e}")
+        
+        if not title:
+            title = f"Project #{cache_key[:8]}"
+        
+        # Quick client lookup
         client_count = 0
         try:
             from database import get_db
             with get_db() as conn:
                 cursor = conn.cursor()
-                # Quick client lookup
-                pass
+                cursor.execute("SELECT COUNT(*) FROM projects WHERE owner_name = ?", (client_name,))
+                row = cursor.fetchone()
+                if row:
+                    client_count = row[0]
         except Exception:
             pass
-
+        
+        from intel.ghost_detector import detect_ghost, format_ghost_report
         result = detect_ghost(
             title=title,
             description=desc,
             budget=budget,
+            client_name=client_name,
             client_project_count=client_count,
         )
         report = format_ghost_report(result, title)
-        await send_message(TELEGRAM_BOT_TOKEN, chat_id, report)
+        
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "🔙 Back", "callback_data": f"src:{source}" if source in ("projects", "fastwork", "sribu") else "menu:back"}],
+            ]
+        }
+        await send_message(TELEGRAM_BOT_TOKEN, chat_id, report, reply_markup=keyboard)
 
-    async def _cmd_skill_radar(self, chat_id: str):
-        """Show skill gap radar — trending skills vs user CV."""
-        await send_message(
-            TELEGRAM_BOT_TOKEN, chat_id,
-            "📡 <b>Skill Gap Radar</b>\n\n"
-            "🔍 Menganalisis trend skill dari semua platform...",
-        )
-
+    async def _cb_skill_radar(self, chat_id: str, message_id: int, callback_id: str):
+        """📡 Radar Skill — triggered from /mycv or /myprofile."""
+        await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="📡 Menganalisis skill market...")
+        
         try:
             from database import get_db
+            from analytics.skill_radar import (
+                extract_skills_from_projects, compare_with_cv,
+                analyze_trends, format_skill_radar, get_projects_for_period
+            )
             with get_db() as conn:
                 current = get_projects_for_period(conn, days=30)
                 previous = get_projects_for_period(conn, days=60)
-
+            
             if not current:
-                await send_message(
-                    TELEGRAM_BOT_TOKEN, chat_id,
-                    "⚠️ Belum cukup data project untuk analisis skill.\n"
-                    "Tunggu beberapa hari sampai data terkumpul.",
-                )
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                    "⚠️ Belum cukup data project untuk analisis skill.\nTunggu beberapa hari sampai data terkumpul.")
                 return
-
+            
             curr_skills = extract_skills_from_projects(current)
             prev_skills = extract_skills_from_projects(previous)
-
+            
             cv_skills = []
             try:
                 profile = get_user_profile(chat_id)
@@ -3668,83 +3683,47 @@ class ProjectsBot:
                     cv_skills = [s.strip() for s in profile["skills"].split(",")]
             except Exception:
                 pass
-
             if not cv_skills:
                 cv_skills = ["Laravel", "PHP", "JavaScript", "MySQL", "Bootstrap", "HTML", "CSS"]
-
+            
             analysis = compare_with_cv(curr_skills, cv_skills)
             trends = analyze_trends(curr_skills, prev_skills)
-
             report = format_skill_radar(analysis, trends)
-            await send_message(TELEGRAM_BOT_TOKEN, chat_id, report)
-
+            
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "📝 Set Profile", "callback_data": "menu:setprofile"}],
+                ]
+            }
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, report, reply_markup=keyboard)
         except Exception as e:
             logger.error(f"Skill radar error: {e}")
-            await send_message(
-                TELEGRAM_BOT_TOKEN, chat_id,
-                f"❌ Gagal menganalisis skill: {e}",
-            )
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id, f"❌ Gagal analisis skill: {e}")
 
-    async def _cmd_timing(self, chat_id: str):
-        """Show bid timing oracle — optimal bid windows."""
-        await send_message(
-            TELEGRAM_BOT_TOKEN, chat_id,
-            "⏰ <b>Bid Timing Oracle</b>\n\n"
-            "🔍 Menganalisis pola posting project...",
-        )
-
-        try:
-            from database import get_db
-            with get_db() as conn:
-                projects = get_projects_with_dates(conn, days=90)
-
-            if len(projects) < 10:
-                await send_message(
-                    TELEGRAM_BOT_TOKEN, chat_id,
-                    "⚠️ Belum cukup data untuk analisis timing.\n"
-                    f"Data tersedia: {len(projects)} project. Butuh minimal 10.",
-                )
-                return
-
-            oracle = TimingOracle()
-            analysis = oracle.analyze(projects)
-            recs = oracle.recommend(analysis)
-            report = format_timing_report(analysis, recs)
-
-            await send_message(TELEGRAM_BOT_TOKEN, chat_id, report)
-
-        except Exception as e:
-            logger.error(f"Timing oracle error: {e}")
-            await send_message(
-                TELEGRAM_BOT_TOKEN, chat_id,
-                f"❌ Gagal menganalisis timing: {e}",
-            )
-
-    async def _cmd_battle(self, chat_id: str, text: str):
-        """Generate 3 persona proposals for a project."""
-        args = text.replace("/battle", "").replace("/battleroyale", "").strip()
-
-        if not args:
-            await send_message(
-                TELEGRAM_BOT_TOKEN, chat_id,
-                "⚔️ <b>Proposal Battle Royale</b>\n\n"
-                "Generate 3 proposal dengan persona berbeda.\n\n"
-                "<b>Format:</b>\n"
-                "<code>/battle Judul Project | Budget | Deskripsi</code>",
-            )
-            return
-
-        parts = args.split("|", 2)
-        title = parts[0].strip() if len(parts) > 0 else ""
-        budget = parts[1].strip() if len(parts) > 1 else ""
-        desc = parts[2].strip() if len(parts) > 2 else ""
-
+    async def _cb_battle_royale(self, chat_id: str, message_id: int, source: str,
+                                 cache_key: str, callback_id: str):
+        """⚔️ Duel Gaya Proposal — triggered after /proposal generation."""
+        await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="⚔️ Generate 3 gaya proposal...")
+        
+        proj_url = self._proposal_url_cache.get(cache_key, "")
+        title = desc = client_name = ""
+        budget_str = "-"
+        
+        if proj_url:
+            try:
+                loop = asyncio.get_event_loop()
+                detail = await loop.run_in_executor(None, scrape_project_detail, proj_url)
+                if detail:
+                    title = detail.title
+                    desc = detail.description or ""
+                    budget_str = detail.budget or "-"
+                    client_name = detail.client_name or ""
+            except Exception as e:
+                logger.error(f"Battle scrape error: {e}")
+        
         if not title:
-            await send_message(TELEGRAM_BOT_TOKEN, chat_id, "❌ Judul project diperlukan.")
-            return
-
-        await send_message(TELEGRAM_BOT_TOKEN, chat_id, format_battle_intro(title))
-
+            title = f"Project #{cache_key[:8]}"
+        
         cv_skills = None
         try:
             profile = get_user_profile(chat_id)
@@ -3752,46 +3731,41 @@ class ProjectsBot:
                 cv_skills = [s.strip() for s in profile["skills"].split(",")]
         except Exception:
             pass
-
+        
+        from ai.proposal_battle import generate_all_personas, format_battle_intro, format_persona_result
+        await send_message(TELEGRAM_BOT_TOKEN, chat_id, format_battle_intro(title))
+        
         battle = generate_all_personas(
             project_title=title,
             project_description=desc,
-            project_budget=budget,
+            project_budget=budget_str,
             cv_skills=cv_skills,
         )
-
+        
         for key in ["agresif", "premium", "teknis"]:
             data = battle[key]
             try:
                 proposal_text = await self._generate_battle_proposal(data["prompt"])
                 formatted = format_persona_result(key, proposal_text)
-
                 if len(formatted) > 4000:
                     chunks = [formatted[i:i+3800] for i in range(0, len(formatted), 3800)]
                     for chunk in chunks:
                         await send_message(TELEGRAM_BOT_TOKEN, chat_id, chunk)
                 else:
                     await send_message(TELEGRAM_BOT_TOKEN, chat_id, formatted)
-
             except Exception as e:
                 logger.error(f"Error generating {key} proposal: {e}")
-                await send_message(
-                    TELEGRAM_BOT_TOKEN, chat_id,
-                    f"⚠️ Gagal generate proposal {PERSONAS[key]['name']}: {e}",
-                )
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                    f"⚠️ Gagal generate proposal {data['persona']['name']}: {e}")
 
     async def _generate_battle_proposal(self, prompt: str) -> str:
         """Generate a proposal using the existing LLM pipeline."""
         try:
             from proposal_generator import OPENROUTER_API_KEY, OPENROUTER_MODEL
-
             if not OPENROUTER_API_KEY:
-                return (
-                    "⚠️ <i>OpenRouter API key tidak ditemukan.</i>\n\n"
-                    "Copy prompt ini ke ChatGPT/Claude:\n\n"
-                    f"<code>{prompt[:500]}...</code>"
-                )
-
+                return (f"⚠️ <i>OpenRouter API key tidak ditemukan.</i>\n\n"
+                        f"Copy prompt ini ke ChatGPT/Claude:\n\n"
+                        f"<code>{prompt[:500]}...</code>")
             headers = {
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
@@ -3802,30 +3776,20 @@ class ProjectsBot:
                 "temperature": 0.8,
                 "max_tokens": 1500,
             }
-
             timeout = aiohttp.ClientTimeout(total=60)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     "https://openrouter.ai/api/v1/chat/completions",
-                    headers=headers,
-                    json=payload,
+                    headers=headers, json=payload,
                 ) as resp:
                     if resp.status != 200:
                         return f"⚠️ Gagal generate: HTTP {resp.status}"
                     data = await resp.json()
                     return data["choices"][0]["message"]["content"]
-
         except ImportError:
             return f"⚠️ <i>proposal_generator tidak tersedia.</i>\n\n<code>{prompt[:800]}...</code>"
         except Exception as e:
             return f"⚠️ Error: {e}"
-
-    async def _cmd_personas(self, chat_id: str):
-        """Show persona comparison."""
-        await send_message(
-            TELEGRAM_BOT_TOKEN, chat_id,
-            compare_personas(),
-        )
 
 
 async def fetch_updates(token: str, offset: int = 0, timeout: int = 30) -> dict:

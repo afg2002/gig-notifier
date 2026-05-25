@@ -1,9 +1,9 @@
 """
-Proposal Battle Royale ⚔️
+Duel Gaya Proposal ⚔️
 Generate 3 proposal variants with different personas:
-- Si Agresif: cheap, fast, bold
-- Si Premium: expensive, high quality, confident
-- Si Teknis: detailed architecture, nerd mode
+- Si Agresif: harga miring, timeline ngebut
+- Si Premium: kualitas enterprise, harga premium
+- Si Teknis: detail arsitektur, tech stack solid
 
 Extends proposal_generator.py with persona-based prompt engineering.
 """

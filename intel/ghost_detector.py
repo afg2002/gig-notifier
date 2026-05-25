@@ -1,7 +1,7 @@
 """
-Ghost Detector 👻
-Analisis project viability — deteksi project yang kemungkinan besar ghosting
-(tidak akan award, client hilang, atau fake posting).
+Detektor Ghosting 👻
+Analisis kredibilitas project — deteksi project yang kemungkinan besar ghosting
+(client hilang tanpa award, fake posting, atau scam).
 
 Pure heuristics — no API needed. Score 0-100 (higher = more ghost).
 """

@@ -1,5 +1,5 @@
 """
-Bid Timing Oracle ⏰
+Waktu Emas Bid ⏰
 Analyze historical project posting times to find optimal bid windows.
 Answers: "Kapan waktu terbaik untuk bid?" based on actual data.
 """
