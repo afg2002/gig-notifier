@@ -33,12 +33,22 @@ def _ensure_table(db_conn):
             platform TEXT DEFAULT '',
             budget TEXT DEFAULT '',
             bid_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status TEXT DEFAULT 'pending',  -- pending, awarded, rejected, ghosted
+            status TEXT DEFAULT 'pending',
             notes TEXT DEFAULT '',
+            followed_up BOOLEAN DEFAULT 0,
+            followup_date TIMESTAMP,
+            reminded_at TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, project_url)
         )
     """)
+    # Migrate existing table if followup columns don't exist
+    try:
+        cursor.execute("SELECT followed_up FROM bid_tracker LIMIT 0")
+    except Exception:
+        cursor.execute("ALTER TABLE bid_tracker ADD COLUMN followed_up BOOLEAN DEFAULT 0")
+        cursor.execute("ALTER TABLE bid_tracker ADD COLUMN followup_date TIMESTAMP")
+        cursor.execute("ALTER TABLE bid_tracker ADD COLUMN reminded_at TIMESTAMP")
     db_conn.commit()
 
 
@@ -178,6 +188,136 @@ def format_bid_stats(stats: dict) -> str:
         f"\n"
         f"💡 <i>Pro tip: Bid dalam 2-4 jam setelah posting untuk win rate lebih tinggi!</i>"
     )
+
+
+def mark_followup(db_conn, user_id: str, project_url: str) -> bool:
+    """Mark a bid as followed up."""
+    cursor = db_conn.cursor()
+    cursor.execute("""
+        UPDATE bid_tracker SET followed_up = 1, followup_date = ?, updated_at = ?
+        WHERE user_id = ? AND project_url = ?
+    """, (datetime.now().isoformat(), datetime.now().isoformat(), user_id, project_url))
+    db_conn.commit()
+    return cursor.rowcount > 0
+
+
+def get_due_followups(db_conn, user_id: str, days: int = 3) -> list[dict]:
+    """Get bids that are due for follow-up (pending > N days, not reminded recently)."""
+    _ensure_table(db_conn)
+    cursor = db_conn.cursor()
+    since = (datetime.now() - timedelta(days=days)).isoformat()
+    cursor.execute("""
+        SELECT project_url, project_title, platform, budget, bid_date, status,
+               followed_up, followup_date, reminded_at
+        FROM bid_tracker
+        WHERE user_id = ? AND status = 'pending'
+          AND bid_date <= ?
+          AND (reminded_at IS NULL OR reminded_at < ?)
+        ORDER BY bid_date ASC
+        LIMIT 10
+    """, (user_id, since, (datetime.now() - timedelta(days=1)).isoformat()))
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def mark_reminded(db_conn, user_id: str, project_url: str) -> None:
+    """Mark that a reminder was sent for this bid."""
+    cursor = db_conn.cursor()
+    cursor.execute("""
+        UPDATE bid_tracker SET reminded_at = ?
+        WHERE user_id = ? AND project_url = ?
+    """, (datetime.now().isoformat(), user_id, project_url))
+    db_conn.commit()
+
+
+def get_daily_briefing_data(db_conn, user_id: str) -> dict:
+    """Get all data needed for daily briefing."""
+    cursor = db_conn.cursor()
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # New projects today (from all tables)
+    new_count = 0
+    perfect_matches = 0
+    for table in ["projects", "fastwork_jobs", "sribu_contests"]:
+        try:
+            cursor.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE posted_date >= ?",
+                (today,)
+            )
+            new_count += cursor.fetchone()[0]
+        except Exception:
+            pass
+
+    # Perfect match estimate (budget > 3jt, from monitored categories)
+    try:
+        cursor.execute(
+            "SELECT COUNT(*) FROM projects WHERE posted_date >= ? AND (budget_raw >= 3000000 OR budget_raw IS NULL)",
+            (today,)
+        )
+        perfect_matches += cursor.fetchone()[0]
+    except Exception:
+        pass
+
+    # Follow-ups due
+    due = get_due_followups(db_conn, user_id, days=3)
+
+    # Bid stats
+    stats = get_bid_stats(db_conn, user_id)
+
+    # Active clients (posted in last 14 days)
+    two_weeks = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+    established = 0
+    try:
+        cursor.execute("""
+            SELECT COUNT(DISTINCT client_name) FROM client_stats
+            WHERE project_count >= 3 AND last_seen >= ?
+        """, (two_weeks,))
+        established += cursor.fetchone()[0]
+    except Exception:
+        pass
+
+    return {
+        "date": today,
+        "new_projects": new_count,
+        "perfect_matches": perfect_matches,
+        "followups_due": len(due),
+        "followup_list": due,
+        "bids": stats,
+        "established_clients": established,
+    }
+
+
+def format_daily_briefing(data: dict) -> str:
+    """Format daily briefing for Telegram."""
+    lines = [
+        "☀️ <b>Selamat Pagi!</b>",
+        "",
+        f"📅 <b>{data['date']}</b>",
+        "",
+        "📊 <b>Hari Ini:</b>",
+        f"• {data['new_projects']} project baru",
+        f"• 🔥 {data['perfect_matches']} cocok untuk lo",
+        f"• 🏢 {data['established_clients']} client established aktif",
+    ]
+
+    if data["followups_due"] > 0:
+        lines.append("")
+        lines.append(f"⏰ <b>{data['followups_due']} project perlu follow-up!</b>")
+        for i, f in enumerate(data["followup_list"][:5], 1):
+            days = _days_ago(f["bid_date"])
+            lines.append(f"  {i}. {f['project_title'][:40]} — {days}")
+
+    lines.append("")
+    bids = data["bids"]
+    lines.append(f"📊 <b>Win Rate:</b> {bids['win_rate']}% ({bids['awarded']}/{bids['total']})")
+    lines.append(f"⏳ <b>Pending:</b> {bids['pending']}")
+    if bids.get("recent_30d", 0) > 0:
+        lines.append(f"🔥 <b>30 Hari:</b> {bids['recent_30d']} bid")
+
+    lines.append("")
+    lines.append("💡 <i>Gunakan /open untuk lihat bid pending.</i>")
+    lines.append("<i>Gunakan /browse untuk cari project baru.</i>")
+
+    return "\n".join(lines)
 
 
 def _days_ago(date_str: str) -> str:

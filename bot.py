@@ -112,7 +112,10 @@ from analytics.match_scorer import score_project, format_match_badge, format_mat
 from tracking.bid_tracker import (
     add_bid, get_open_bids, get_bid_stats,
     format_open_bids, format_bid_stats,
+    mark_followup, get_due_followups, mark_reminded,
+    get_daily_briefing_data, format_daily_briefing,
 )
+from ai.pitch_generator import build_pitch_from_profile, format_pitch_result
 
 logging.basicConfig(
     level=logging.INFO,
@@ -836,6 +839,27 @@ def _truncate(text: str, max_len: int) -> str:
         return text
     return text[:max_len].rsplit(" ", 1)[0] + "..."
 
+def _days_from_date(date_str: str) -> str:
+    """Human-friendly time ago for follow-up reminders."""
+    if not date_str:
+        return "?"
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(date_str[:19])
+        delta = datetime.now() - dt
+        if delta.days == 0:
+            return "Hari ini"
+        elif delta.days == 1:
+            return "Kemarin"
+        elif delta.days < 7:
+            return f"{delta.days} hari lalu"
+        elif delta.days < 30:
+            return f"{delta.days // 7} minggu lalu"
+        else:
+            return f"{delta.days} hari lalu"
+    except Exception:
+        return "?"
+
 
 def _is_published_today(published_date: str) -> bool:
     """Check if a project was published today.
@@ -1364,6 +1388,8 @@ class ProjectsBot:
             await self._cmd_myprofile(chat_id)
         elif text.startswith("/bid"):
             await self._cmd_bid(chat_id, text)
+        elif text.startswith("/pitch"):
+            await self._cmd_pitch(chat_id, text)
         elif text in ("/open", "/bids", "/pending"):
             await self._cmd_open_bids(chat_id)
         elif text in ("/stats", "/mystats", "/bidstats"):
@@ -1467,6 +1493,11 @@ class ProjectsBot:
                 source = parts[1]
                 cache_key = parts[2] if len(parts) > 2 else ""
                 await self._cb_client_intel(chat_id, message_id, source, cache_key, callback_id)
+            elif action == "pitch":
+                # pitch:<source>:<cache_key>
+                source = parts[1]
+                cache_key = parts[2] if len(parts) > 2 else ""
+                await self._cb_quick_pitch(chat_id, message_id, source, cache_key, callback_id)
             elif action == "help":
                 help_action = parts[1] if len(parts) > 1 else "all"
                 if help_action == "back":
@@ -1662,8 +1693,11 @@ class ProjectsBot:
                 "💡 <i>3 tombol di detail project: Ghosting, Client Intel, AI Proposal.</i>"
             ),
             "proposal": (
-                "📝 <b>AI PROPOSAL</b>\n\n"
-                "/proposal [url] — Generate proposal dari URL project\n\n"
+                "📝 <b>AI PROPOSAL + PITCH</b>\n\n"
+                "/proposal [url] — Generate proposal dari URL project\n"
+                "/pitch [url] — Generate 3-4 kalimat pitch (fast response!)\n\n"
+                "💬 <b>Quick Pitch</b> — Tombol di detail project, lebih cepat\n"
+                "   dari proposal. Cocok buat fastwork/sribu.\n\n"
                 "⚔️ <b>Duel Gaya Proposal</b> — Setelah generate, klik\n"
                 "   \"Bandingkan 3 Gaya\" untuk lihat 3 persona:\n"
                 "   🔥 Si Agresif | 💎 Si Premium | 🤓 Si Teknis\n\n"
@@ -1671,7 +1705,9 @@ class ProjectsBot:
                 "/bid [url] — Tandai project sudah di-bid\n"
                 "/open — Lihat bid pending\n"
                 "/stats — Win rate & statistik bid\n\n"
-                "💡 <i>Workflow: Browse → Cek Ghosting → Client Intel → Proposal → /bid → /open</i>"
+                "⏰ <b>Auto Follow-up:</b> Bot otomatis ingetin kalo\n"
+                "   lo belum follow-up 3+ hari setelah bid.\n\n"
+                "💡 <i>Workflow: Browse → Cek Ghosting → Client Intel → Pitch/Proposal → /bid → Auto Follow-up</i>"
             ),
             "profile": (
                 "👤 <b>PROFILE & CV</b>\n\n"
@@ -1690,22 +1726,25 @@ class ProjectsBot:
                 "🌐 <b>Browse:</b> /browse /fw /sribu /refresh\n"
                 "🔔 <b>Monitor:</b> /monitor /status /digest\n"
                 "📊 <b>Analytics:</b> /trends /topclients\n"
-                "📝 <b>Proposal:</b> /proposal /uploadcv /mycv /setprofile /myprofile\n"
+                "📝 <b>Proposal:</b> /proposal /pitch /uploadcv /mycv /setprofile /myprofile\n"
                 "📊 <b>Bid Tracker:</b> /bid /open /stats\n"
                 "🛠️ <b>Other:</b> /start /help\n\n"
                 "🧠 <b>Fitur Pintar (terintegrasi di detail project):</b>\n"
                 "👻 <b>Detektor Ghosting</b> — \"Cek Ghosting\"\n"
                 "🔍 <b>Client Intel</b> — \"Client Intel\"\n"
                 "🎯 <b>Skor Kecocokan</b> — Badge otomatis di project card\n"
+                "💬 <b>Quick Pitch</b> — \"Quick Pitch\" (3 kalimat)\n"
                 "📡 <b>Radar Skill</b> — Di /mycv → \"Radar Skill\"\n"
                 "⏰ <b>Waktu Emas Bid</b> — Di /trends (otomatis)\n"
-                "⚔️ <b>Duel Gaya Proposal</b> — Setelah /proposal → \"Bandingkan 3 Gaya\"\n\n"
+                "⚔️ <b>Duel Gaya Proposal</b> — Setelah /proposal → \"Bandingkan 3 Gaya\"\n"
+                "⏰ <b>Auto Follow-up</b> — Reminder otomatis tiap 6 jam\n"
+                "☀️ <b>Daily Briefing</b> — Ringkasan pagi (jam 8 AM)\n\n"
                 "💡 <b>Workflow Rekomendasi:</b>\n"
                 "1. /setprofile → /uploadcv\n"
                 "2. /browse → pilih project\n"
                 "3. 👻 Cek Ghosting → 🔍 Client Intel\n"
-                "4. 📝 Generate AI Proposal → ⚔️ Bandingkan 3 Gaya\n"
-                "5. /bid [url] → /open (tracking)\n"
+                "4. 💬 Quick Pitch atau 📝 Proposal → ⚔️ Bandingkan 3 Gaya\n"
+                "5. /bid [url] → auto follow-up reminder\n"
                 "6. /stats → pantau win rate"
             ),
         }
@@ -2439,6 +2478,7 @@ class ProjectsBot:
                 [{"text": "📝 Generate AI Proposal", "callback_data": f"proposal:fw:{proposal_key}"}],
                 [{"text": "👻 Cek Ghosting", "callback_data": f"ghost:fw:{proposal_key}"},
                  {"text": "🔍 Client Intel", "callback_data": f"client_intel:fw:{proposal_key}"}],
+                [{"text": "💬 Quick Pitch", "callback_data": f"pitch:fw:{proposal_key}"}],
                 [{"text": "🔙 Back to Jobs", "callback_data": f"fwcat:{job.tag_id}:1"}],
             ]
         }
@@ -2639,6 +2679,7 @@ class ProjectsBot:
                 [{"text": "📝 Generate AI Proposal", "callback_data": f"proposal:sribu:{proposal_key}"}],
                 [{"text": "👻 Cek Ghosting", "callback_data": f"ghost:sribu:{proposal_key}"},
                  {"text": "🔍 Client Intel", "callback_data": f"client_intel:sribu:{proposal_key}"}],
+                [{"text": "💬 Quick Pitch", "callback_data": f"pitch:sribu:{proposal_key}"}],
                 [{"text": "🔙 Back to Contests", "callback_data": "sribu_cat:all:1"}],
             ]
         }
@@ -3128,6 +3169,7 @@ class ProjectsBot:
                 [{"text": "📝 Generate AI Proposal", "callback_data": f"proposal:projects:{proposal_key}"}],
                 [{"text": "👻 Cek Ghosting", "callback_data": f"ghost:projects:{proposal_key}"},
                  {"text": "🔍 Client Intel", "callback_data": f"client_intel:projects:{proposal_key}"}],
+                [{"text": "💬 Quick Pitch", "callback_data": f"pitch:projects:{proposal_key}"}],
                 [{"text": "🔙 Kembali ke List", "callback_data": f"page:{category_id}:{page}"}],
                 [{"text": "🏠 Main Menu", "callback_data": "menu:back"}],
             ]
@@ -3390,8 +3432,42 @@ class ProjectsBot:
         # Send startup notification
         await self._send_startup_notification()
 
+        # Start background scheduler (follow-up reminders + daily briefing)
+        asyncio.create_task(self._scheduler_loop())
+
         # Run monitoring loop (this includes all scraping logic)
         await self.monitoring_loop()
+
+    async def _scheduler_loop(self):
+        """Background scheduler: follow-up reminders every 6h, daily briefing at 8 AM."""
+        logger.info("Scheduler started: follow-up every 6h, briefing daily at 8 AM")
+        last_briefing_date = None
+        last_followup_check = None
+        
+        while self._running:
+            now = datetime.now()
+            today = now.strftime("%Y-%m-%d")
+            hour = now.hour
+            
+            # Daily briefing at 8-9 AM (run once per day)
+            if 8 <= hour < 9 and last_briefing_date != today:
+                logger.info("Sending daily briefing...")
+                try:
+                    await self._send_daily_briefing()
+                except Exception as e:
+                    logger.error(f"Daily briefing failed: {e}")
+                last_briefing_date = today
+            
+            # Follow-up check every 6 hours
+            if last_followup_check is None or (now - last_followup_check).total_seconds() >= 6 * 3600:
+                logger.info("Checking follow-up reminders...")
+                try:
+                    await self._check_and_remind_followups()
+                except Exception as e:
+                    logger.error(f"Follow-up check failed: {e}")
+                last_followup_check = now
+            
+            await asyncio.sleep(300)  # Check every 5 minutes
 
     async def monitoring_loop(self):
         """Monitoring loop - scrapes projects and sends notifications.
@@ -3847,6 +3923,196 @@ class ProjectsBot:
             report = f"❌ Gagal load stats: {e}"
         
         await send_message(TELEGRAM_BOT_TOKEN, chat_id, report)
+
+    async def _cmd_pitch(self, chat_id: str, text: str):
+        """💬 /pitch [url] — generate quick 3-4 kalimat pitch."""
+        parts = text.split(" ", 1)
+        url = parts[1].strip() if len(parts) > 1 else ""
+
+        if not url:
+            await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                "💬 <b>Quick Pitch Generator</b>\n\n"
+                "Format: <code>/pitch [url_project]</code>\n\n"
+                "Contoh:\n"
+                "<code>/pitch https://projects.co.id/view/abc123/project-title</code>\n\n"
+                "Generate 3-4 kalimat pitch singkat — tinggal copy-paste ke client.",
+            )
+            return
+
+        await tg_request(TELEGRAM_BOT_TOKEN, "sendChatAction",
+                         {"chat_id": int(chat_id), "action": "typing"})
+
+        title = desc = budget_str = ""
+        try:
+            loop = asyncio.get_event_loop()
+            detail = await loop.run_in_executor(None, scrape_project_detail, url)
+            if detail:
+                title = detail.title or "Project"
+                desc = detail.description or ""
+                budget_str = detail.budget or "-"
+        except Exception:
+            pass
+
+        profile = get_user_profile(chat_id)
+        prompt = build_pitch_from_profile(
+            project_title=title,
+            project_description=desc,
+            project_budget=budget_str,
+            profile=profile,
+        )
+
+        try:
+            from proposal_generator import OPENROUTER_API_KEY, OPENROUTER_MODEL
+            if not OPENROUTER_API_KEY:
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                    "⚠️ OpenRouter API key tidak ditemukan.\n\n"
+                    f"<i>Prompt pitch:</i>\n<code>{prompt[:400]}...</code>")
+                return
+
+            headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                       "Content-Type": "application/json"}
+            payload = {"model": OPENROUTER_MODEL,
+                       "messages": [{"role": "user", "content": prompt}],
+                       "temperature": 0.7, "max_tokens": 300}
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers, json=payload,
+                ) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP {resp.status}")
+                    data = await resp.json()
+                    pitch_text = data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"Pitch LLM error: {e}")
+            pitch_text = f"⚠️ Gagal generate pitch: {e}\n\n<i>Prompt (bisa copy ke ChatGPT):</i>\n<code>{prompt[:300]}...</code>"
+
+        result = format_pitch_result(pitch_text, title)
+        await send_message(TELEGRAM_BOT_TOKEN, chat_id, result)
+
+    async def _cb_quick_pitch(self, chat_id: str, message_id: int, source: str,
+                               cache_key: str, callback_id: str):
+        """💬 Quick Pitch — integrated into project detail views."""
+        await answer_callback(TELEGRAM_BOT_TOKEN, callback_id, text="💬 Generate quick pitch...")
+
+        proj_url = self._proposal_url_cache.get(cache_key, "")
+        title = desc = budget_str = ""
+
+        if proj_url:
+            try:
+                loop = asyncio.get_event_loop()
+                detail = await loop.run_in_executor(None, scrape_project_detail, proj_url)
+                if detail:
+                    title = detail.title or ""
+                    desc = detail.description or ""
+                    budget_str = detail.budget or "-"
+            except Exception as e:
+                logger.error(f"Pitch scrape error: {e}")
+
+        if not title:
+            title = f"Project #{cache_key[:8]}"
+
+        profile = get_user_profile(chat_id)
+        prompt = build_pitch_from_profile(title, desc, budget_str, profile)
+
+        try:
+            from proposal_generator import OPENROUTER_API_KEY, OPENROUTER_MODEL
+            if not OPENROUTER_API_KEY:
+                await send_message(TELEGRAM_BOT_TOKEN, chat_id,
+                    f"⚠️ OpenRouter API key tidak ditemukan.\n\n"
+                    f"<i>Prompt:</i>\n<code>{prompt[:400]}...</code>")
+                return
+
+            headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                       "Content-Type": "application/json"}
+            payload = {"model": OPENROUTER_MODEL,
+                       "messages": [{"role": "user", "content": prompt}],
+                       "temperature": 0.7, "max_tokens": 300}
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers=headers, json=payload,
+                ) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP {resp.status}")
+                    data = await resp.json()
+                    pitch_text = data["choices"][0]["message"]["content"]
+        except Exception as e:
+            logger.error(f"Pitch LLM error: {e}")
+            pitch_text = f"⚠️ Gagal generate pitch: {e}\n\n<i>Prompt:</i>\n<code>{prompt[:300]}...</code>"
+
+        result = format_pitch_result(pitch_text, title)
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "📊 Lacak Bid", "callback_data": f"bid:{source}:{cache_key}" if False else "menu:openbids"}],
+                [{"text": "🔙 Back", "callback_data": f"src:{source}" if source in ("projects", "fastwork", "sribu") else "menu:back"}],
+            ]
+        }
+        await send_message(TELEGRAM_BOT_TOKEN, chat_id, result, reply_markup=keyboard)
+
+    # ---- Follow-up & Daily Briefing ---- 
+
+    async def _check_and_remind_followups(self):
+        """Periodic check: remind user about due follow-ups."""
+        try:
+            from database import get_db
+            # Get all users who have bids
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT user_id FROM bid_tracker")
+                users = [row[0] for row in cursor.fetchall()]
+            
+            for user_id in users:
+                with get_db() as conn:
+                    due = get_due_followups(conn, user_id, days=3)
+                
+                if due:
+                    lines = [f"⏰ <b>Follow-up Reminder</b>\n"]
+                    lines.append(f"Lo punya {len(due)} project yg udah 3+ hari tanpa follow-up:\n")
+                    for i, f in enumerate(due[:5], 1):
+                        days = _days_from_date(f["bid_date"])
+                        lines.append(f"  {i}. {f['project_title'][:40]} — {days}")
+                    lines.append("\n💡 <i>Follow-up bisa naikin chance lo 2x lipat!</i>")
+                    lines.append("<i>Gunakan /open untuk lihat & manage bid.</i>")
+                    
+                    try:
+                        await send_message(TELEGRAM_BOT_TOKEN, user_id, "\n".join(lines))
+                        # Mark as reminded
+                        with get_db() as conn:
+                            for f in due:
+                                mark_reminded(conn, user_id, f["project_url"])
+                    except Exception as e:
+                        logger.error(f"Failed to send followup reminder to {user_id}: {e}")
+        except Exception as e:
+            logger.error(f"Followup check error: {e}")
+
+    async def _send_daily_briefing(self):
+        """Send daily morning briefing to all users."""
+        try:
+            from database import get_db
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT user_id FROM bid_tracker")
+                users = [row[0] for row in cursor.fetchall()]
+            
+            # Also check users who have profiles
+            cursor.execute("SELECT DISTINCT user_id FROM user_settings")
+            for row in cursor.fetchall():
+                if row[0] not in users:
+                    users.append(row[0])
+            
+            for user_id in users:
+                with get_db() as conn:
+                    data = get_daily_briefing_data(conn, user_id)
+                briefing = format_daily_briefing(data)
+                try:
+                    await send_message(TELEGRAM_BOT_TOKEN, user_id, briefing)
+                except Exception as e:
+                    logger.error(f"Failed to send briefing to {user_id}: {e}")
+        except Exception as e:
+            logger.error(f"Daily briefing error: {e}")
 
     async def _cb_skill_radar(self, chat_id: str, message_id: int, callback_id: str):
         """📡 Radar Skill — triggered from /mycv or /myprofile."""
