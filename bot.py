@@ -1398,8 +1398,7 @@ class ProjectsBot:
             await send_message(
                 TELEGRAM_BOT_TOKEN,
                 chat_id,
-                "🤖 <b>Command tidak dikenali</b>\n\n"
-                "Gunakan menu di bawah atau ketik /help untuk bantuan.",
+                "🤖 <b>Menu Utama</b>\n\nPilih aksi di bawah:",
                 reply_markup=build_main_menu_keyboard(),
             )
 
