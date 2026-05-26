@@ -765,6 +765,14 @@ def format_project_card(project: Project, index: int = 0) -> str:
 
     card += f"👤 <b>Owner:</b> {project.owner_name}\n"
 
+    # Quick match score badge
+    try:
+        budget_val = _parse_budget(project.budget) if project.budget else None
+        match = score_project(project.title, project.description or "", budget_val, bid_count)
+        card += f"\n🎯 <b>Match:</b> {match.emoji} {match.composite}% — {match.label}\n"
+    except Exception:
+        pass
+
     return card
 
 
@@ -792,6 +800,13 @@ def format_project_list(
             f"   {bid_emoji} {p.bid_count or '0'} bids  •  "
             f"📅 {p.published_date or '-'}"
         )
+        # Quick match badge
+        try:
+            budget_val = _parse_budget(p.budget) if p.budget else None
+            match = score_project(p.title, p.description or "", budget_val, bid_count)
+            items[-1] += f"  •  🎯{match.emoji}{match.composite}%"
+        except Exception:
+            pass
 
     return header + "\n\n".join(items)
 
@@ -1042,6 +1057,14 @@ def format_sribu_contest_card(contest: SribuContest, index: int = 0) -> str:
     if tags_str and tags_str != "-":
         card_lines.append(f"🏷️ <b>Tags:</b> {tags_str}\n")
 
+    # Quick match score badge (Sribu: no bid count → pass 0)
+    try:
+        budget_val = _parse_budget(budget_str) if budget_str and budget_str != "Scraping..." else None
+        match = score_project(contest.title, contest.description or "", budget_val, 0)
+        card_lines.append(f"🎯 <b>Match:</b> {match.emoji} {match.composite}% — {match.label}\n")
+    except Exception:
+        pass
+
     return "".join(card_lines)
 
 
@@ -1064,6 +1087,13 @@ def format_sribu_contests_list(
             f"{c.category_emoji} {c.category_name}\n"
             f"   📊 {c.status_label}  •  🏷️ {', '.join(c.tags[:2]) if c.tags else '-'}\n"
         )
+        # Quick match badge
+        try:
+            budget_val = _parse_budget(budget_str) if budget_str and budget_str != "-" else None
+            match = score_project(c.title, c.description or "", budget_val, 0)
+            items[-1] += f"   🎯{match.emoji}{match.composite}% — {match.label}\n"
+        except Exception:
+            pass
 
     return header + "\n\n".join(items)
 
@@ -1131,6 +1161,14 @@ def format_fastwork_job_card(job: FastworkJob, index: int = 0) -> str:
     if job.client_name:
         card_lines.append(f"👤 <b>Client:</b> {job.client_name}\n")
 
+    # Quick match score badge
+    try:
+        budget_val = _parse_budget(job.budget) if job.budget else None
+        match = score_project(job.title, job.description or "", budget_val, job.offers_count)
+        card_lines.append(f"🎯 <b>Match:</b> {match.emoji} {match.composite}% — {match.label}\n")
+    except Exception:
+        pass
+
     return "".join(card_lines)
 
 
@@ -1155,6 +1193,13 @@ def format_fastwork_jobs_list(
             f"{offers_emoji} {job.offers_count} offers\n"
             f"   📂 {job.tag_name}  •  📅 {job.published_date}"
         )
+        # Quick match badge
+        try:
+            budget_val = _parse_budget(job.budget) if job.budget else None
+            match = score_project(job.title, job.description or "", budget_val, job.offers_count)
+            items[-1] += f"  •  🎯{match.emoji}{match.composite}%"
+        except Exception:
+            pass
 
     return header + "\n\n".join(items)
 
