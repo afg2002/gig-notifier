@@ -745,38 +745,37 @@ async def answer_callback(token: str, callback_query_id: str, text: str = "") ->
 
 
 def format_project_card(project: Project, index: int = 0) -> str:
-    """Format a single project as a beautiful card with emojis."""
+    """Format a single project card — matching Fastwork style."""
     weekly_emoji = "✅" if project.need_weekly_report == "Yes" else "❌"
-    bid_count = int(project.bid_count) if project.bid_count.isdigit() else 0
+    bid_count = int(project.bid_count) if project.bid_count and project.bid_count.isdigit() else 0
     bid_emoji = "🔥" if bid_count > 20 else "👥" if bid_count > 5 else "🆕"
 
-    card = (
-        f"{'─' * 30}\n"
-        f"<b>#{index + 1} {project.title}</b>\n\n"
-        f"📝 <i>{_truncate(project.description, 300)}</i>\n\n"
-        f"💰 <b>Budget:</b> {project.budget or '-'}\n"
-        f"📅 <b>Published:</b> {project.published_date or '-'}\n"
-        f"⏰ <b>Deadline:</b> {project.deadline or '-'}\n"
-        f"📆 <b>Finish:</b> {project.finish_days or '-'} hari\n"
-        f"📊 <b>Status:</b> {project.status or '-'}\n"
-        f"{bid_emoji} <b>Bids:</b> {project.bid_count or '0'}\n"
-        f"📄 <b>Weekly Report:</b> {weekly_emoji} {project.need_weekly_report}\n"
-    )
+    card_lines = [
+        f"💻 <b>#{index + 1} {project.title}</b>\n",
+        f"📝 <i>{_truncate(project.description, 300)}</i>\n",
+        f"💰 <b>Budget:</b> {project.budget or '-'}\n",
+        f"📅 <b>Published:</b> {project.published_date or '-'}\n",
+        f"⏰ <b>Deadline:</b> {project.deadline or '-'}\n",
+        f"📆 <b>Duration:</b> {project.finish_days or '-'} hari\n",
+        f"📊 <b>Status:</b> {project.status or '-'}\n",
+        f"{bid_emoji} <b>Bids:</b> {project.bid_count or '0'}\n",
+        f"📄 <b>Weekly Report:</b> {weekly_emoji}\n",
+    ]
 
     if project.tags:
-        card += f"🏷️ <b>Tags:</b> {', '.join(project.tags)}\n"
+        card_lines.append(f"🏷️ <b>Tags:</b> {', '.join(project.tags)}\n")
 
-    card += f"👤 <b>Owner:</b> {project.owner_name}\n"
+    card_lines.append(f"👤 <b>Client:</b> {project.owner_name}\n")
 
     # Quick match score badge
     try:
         budget_val = _parse_budget(project.budget) if project.budget else None
         match = score_project(project.title, project.description or "", budget_val, bid_count)
-        card += f"\n🎯 <b>Match:</b> {match.emoji} {match.composite}% — {match.label}\n"
+        card_lines.append(f"🎯 <b>Match:</b> {match.emoji} {match.composite}% — {match.label}\n")
     except Exception:
         pass
 
-    return card
+    return "".join(card_lines)
 
 
 def format_project_list(
@@ -1594,7 +1593,7 @@ class ProjectsBot:
         new_projects = [p for p in projects if not self.tracker.is_seen(p.project_id)]
 
         if new_projects:
-            text = f"🆕 <b>{len(new_projects)} Project Baru Ditemukan!</b>\n\n"
+            text = f"💻 <b>{len(new_projects)} Project Baru Ditemukan!</b>\n\n"
             for i, p in enumerate(reversed(new_projects[:10])):
                 text += format_project_card(p, i)
                 text += "\n"
@@ -3537,7 +3536,7 @@ class ProjectsBot:
 
                         cat_emoji = category["emoji"]
                         header = (
-                            f"🆕 <b>{len(new_projects)} Project Baru</b> "
+                            f"💻 <b>{len(new_projects)} Project Baru</b> "
                             f"di {cat_emoji} <b>{category['name']}</b>!\n\n"
                         )
 
@@ -3556,29 +3555,7 @@ class ProjectsBot:
                                     pass
                             record_project(category["id"], p.budget, published_hour, "projects")
 
-                            bid_count = (
-                                int(p.bid_count)
-                                if p.bid_count and p.bid_count.isdigit()
-                                else 0
-                            )
-                            bid_emoji = (
-                                "🔥" if bid_count > 20
-                                else "👥" if bid_count > 5
-                                else "🆕"
-                            )
-                            budget_cmp = get_budget_comparison(p.budget)
-                            client_rep = get_client_reputation(p.owner_name)
-                            desc_short = (p.description[:150] + "...") if len(p.description) > 150 else p.description
-                            cmp_txt = f"\n   {budget_cmp}" if budget_cmp else ""
-                            msg = (
-                                f"<b>▸ {p.title}</b>\n"
-                                f"   📝 {desc_short}\n\n"
-                                f"   💰 {p.budget or '-'}{cmp_txt}\n"
-                                f"   {bid_emoji} {p.bid_count or '0'} bids  •  "
-                                f"👤 {p.owner_name} — {client_rep}\n"
-                                f"   📅 {p.published_date or '-'}  •  "
-                                f"🔗 <a href='{p.link}'>View →</a>\n"
-                            )
+                            msg = format_project_card(p, i)
                             chat_ids = get_chat_ids()
                             if len(chat_ids) > 1:
                                 await broadcast(
